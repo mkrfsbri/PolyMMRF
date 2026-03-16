@@ -1,0 +1,80 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Polymarket Market Making Bot — Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Secrets (private_key, api keys) should be set via environment variables.
+# See .env.example for required env vars.
+
+[polymarket]
+# Polymarket CLOB REST API base URL
+clob_api_url    = "https://clob.polymarket.com"
+# Polymarket WebSocket subscriptions URL
+ws_url          = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+# Gamma (metadata) API base URL
+gamma_api_url   = "https://gamma-api.polymarket.com"
+# Wallet address (override with POLY_FUNDER_ADDRESS env var)
+funder_address  = ""
+# Private key (override with POLY_PRIVATE_KEY env var — NEVER commit real key)
+private_key     = ""
+# Signature type: 0=EOA, 1=Proxy, 2=GnosisSafe
+signature_type  = 0
+# Polygon (MATIC) chain ID
+chain_id        = 137
+
+[binance]
+# Binance WebSocket ticker stream for BTC/USDT spot price
+ws_url      = "wss://stream.binance.com:9443/ws/btcusdt@ticker"
+# Binance REST API base URL (for fallback)
+rest_url    = "https://api.binance.com"
+# Trading symbol
+symbol      = "BTCUSDT"
+
+[strategy]
+# Target bid price in USDC (0.45 = 45 cents)
+# For 50/50 markets this captures maximum maker rebate
+target_bid_price     = 0.45
+# Half-spread: distance from mid to bid/ask in price units (0.03 = 3 cents)
+half_spread          = 0.03
+# Minimum half-spread (floor, prevents too-tight quotes)
+min_spread           = 0.01
+# Maximum half-spread (cap, prevents too-wide quotes)
+max_spread           = 0.10
+# Default order size in shares
+order_size           = 10.0
+# How often to refresh/replace quotes (milliseconds)
+quote_refresh_ms     = 5000
+# Inventory ratio deviation threshold before applying skew (e.g. 0.1 = 10%)
+inventory_skew_threshold = 0.10
+# Max skew adjustment per side (price units)
+inventory_skew_amount    = 0.02
+# Market window: "5m" (300s) or "15m" (900s)
+market_type          = "5m"
+# Assets to trade
+assets               = ["BTC"]
+# Post-only orders (maker rebate farming — keep true in production)
+post_only            = true
+
+[risk]
+# Total trading bankroll in USDC
+bankroll             = 1000.0
+# Max fraction of bankroll exposed in any single market (0.10 = 10%)
+max_exposure_pct     = 0.10
+# Maximum concurrent markets (MVP: 1)
+max_concurrent_markets = 1
+# Pause trading if daily loss exceeds this fraction of bankroll (0.05 = 5%)
+daily_loss_limit_pct = 0.05
+# Refuse new orders if inventory ratio exceeds this threshold (0.75 = 75:25)
+max_inventory_ratio  = 0.75
+# Pause bot after this many consecutive losses
+circuit_breaker_losses = 5
+# Cancel all open orders this many seconds before market settlement (min 5)
+pre_settlement_cancel_secs = 10
+
+[bot]
+# Run in simulation mode (no real orders placed)
+# Set to false for live trading
+simulation      = true
+# Log level: trace, debug, info, warn, error
+log_level       = "info"
+# Prometheus metrics (not yet implemented — future feature)
+metrics_enabled = false
+metrics_port    = 9090
