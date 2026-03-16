@@ -4,7 +4,7 @@ A high-performance market making bot for [Polymarket](https://polymarket.com) BT
 
 ```
 ╔═══════════════════════════════════════════════════════╗
-║       Polymarket Market Making Bot  v0.1.0            ║
+║       Polymarket Market Making Bot  v0.2.0            ║
 ║       Strategy: Maker Rebate Farming (BTC 5m/15m)     ║
 ╚═══════════════════════════════════════════════════════╝
 ```
@@ -18,6 +18,7 @@ A high-performance market making bot for [Polymarket](https://polymarket.com) BT
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
+- [BTC Price Feed & Coinbase Fallback](#btc-price-feed--coinbase-fallback)
 - [Environment Variables](#environment-variables)
 - [Running](#running)
 - [Docker](#docker)
@@ -26,6 +27,7 @@ A high-performance market making bot for [Polymarket](https://polymarket.com) BT
 - [Testing](#testing)
 - [Project Structure](#project-structure)
 - [Production Hardening](#production-hardening)
+- [Changelog](#changelog)
 - [Disclaimer](#disclaimer)
 
 ---
@@ -149,6 +151,50 @@ All settings live in `config.toml`. Secrets are loaded from environment variable
 |-----|---------|-------------|
 | `simulation` | `true` | **Must set to `false` for live trading** |
 | `log_level` | `"info"` | `trace`/`debug`/`info`/`warn`/`error` |
+
+---
+
+## BTC Price Feed & Coinbase Fallback
+
+The bot maintains an uninterrupted BTC spot price using a two-tier feed:
+
+```
+Primary  ──►  Binance WebSocket  wss://stream.binance.com:9443/ws/btcusdt@ticker
+                    │  (geo-blocked or repeated errors?)
+                    ▼  after max_binance_failures consecutive failures
+Fallback ──►  Coinbase REST  GET https://api.coinbase.com/v2/prices/BTC-USD/spot
+                    │  (polls every poll_interval_ms)
+                    ▼  after retry_binance_secs
+                    └─► silently retry Binance → switch back if reconnected
+```
+
+No Coinbase API key is required. The fallback is designed for geo-blocked
+regions (e.g. some jurisdictions that block Binance but not Coinbase) and for
+general Binance outages.
+
+### `[coinbase]` config keys
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `rest_url` | `https://api.coinbase.com/v2/prices/BTC-USD/spot` | Coinbase spot endpoint |
+| `poll_interval_ms` | `5000` | How often to poll while in fallback mode |
+| `max_binance_failures` | `3` | Failures before switching to Coinbase |
+| `retry_binance_secs` | `60` | Seconds in fallback before retrying Binance |
+| `enabled` | `true` | Set to `false` to disable the fallback entirely |
+
+**Tuning for geo-blocked environments:** set `max_binance_failures = 1` and
+`retry_binance_secs = 300` so the bot stops wasting time on refused connections
+and only re-checks Binance every 5 minutes.
+
+**Log indicators:**
+```
+WARN  Binance WS failure #3/3: connection refused
+WARN  Binance WS unavailable after 3 failures — activating Coinbase REST fallback
+INFO  BTC/Coinbase: $65432.10
+...
+INFO  Retrying Binance WebSocket after fallback period...
+INFO  Binance WebSocket connected (source: primary)
+```
 
 ---
 
@@ -347,6 +393,12 @@ Maker rebate:    25% of taker fees, paid daily in USDC
 Tick size:       0.01
 Min order:       5 shares
 ```
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a full history of changes by version.
 
 ---
 

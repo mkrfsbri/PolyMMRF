@@ -50,6 +50,32 @@ impl Default for BinanceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinbaseConfig {
+    /// Coinbase Advanced Trade spot price endpoint (no auth required)
+    pub rest_url: String,
+    /// How often to poll when in fallback mode (milliseconds)
+    pub poll_interval_ms: u64,
+    /// Switch to Coinbase after this many consecutive Binance WS failures
+    pub max_binance_failures: u32,
+    /// While in Coinbase fallback, retry Binance WS every N seconds
+    pub retry_binance_secs: u64,
+    /// Set to false to disable the Coinbase fallback entirely
+    pub enabled: bool,
+}
+
+impl Default for CoinbaseConfig {
+    fn default() -> Self {
+        Self {
+            rest_url: "https://api.coinbase.com/v2/prices/BTC-USD/spot".into(),
+            poll_interval_ms: 5000,
+            max_binance_failures: 3,
+            retry_binance_secs: 60,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
     /// Target bid price (e.g. 0.45 means we bid at 45 cents)
     pub target_bid_price: f64,
@@ -148,6 +174,8 @@ pub struct BotConfig {
     pub polymarket: PolymarketConfig,
     #[serde(default)]
     pub binance: BinanceConfig,
+    #[serde(default)]
+    pub coinbase: CoinbaseConfig,
     #[serde(default)]
     pub strategy: StrategyConfig,
     #[serde(default)]

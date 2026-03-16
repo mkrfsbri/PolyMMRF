@@ -28,6 +28,19 @@ rest_url    = "https://api.binance.com"
 # Trading symbol
 symbol      = "BTCUSDT"
 
+[coinbase]
+# Coinbase Advanced Trade spot price REST endpoint (no API key required)
+rest_url            = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+# How often to poll Coinbase while Binance WS is unavailable (milliseconds)
+poll_interval_ms    = 5000
+# Switch to Coinbase after this many consecutive Binance WS failures
+# Increase this on stable connections; lower it in geo-blocked regions
+max_binance_failures = 3
+# While in Coinbase fallback, retry Binance WS every N seconds
+retry_binance_secs  = 60
+# Set to false to disable the Coinbase fallback entirely (not recommended)
+enabled             = true
+
 [strategy]
 # Target bid price in USDC (0.45 = 45 cents)
 # For 50/50 markets this captures maximum maker rebate

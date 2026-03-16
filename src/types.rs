@@ -58,6 +58,7 @@ impl MarketType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PriceSource {
     Binance,
+    Coinbase,
     Chainlink,
     Polymarket,
 }
