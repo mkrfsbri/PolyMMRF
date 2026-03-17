@@ -383,9 +383,15 @@ impl MarketDiscovery {
             .filter_map(|m| {
                 let slug = m["slug"].as_str()?.to_string();
 
+                // Skip markets that are closed/resolved/archived or explicitly not
+                // accepting orders. acceptingOrders=false can mean: closed, pre-open
+                // window, or awaiting resolution. Only skip when the field is
+                // explicitly false (absent means "unknown" — CLOB verify will catch it).
+                let not_accepting = m["acceptingOrders"].as_bool() == Some(false);
                 if m["closed"].as_bool().unwrap_or(false)
                     || m["resolved"].as_bool().unwrap_or(false)
                     || m["archived"].as_bool().unwrap_or(false)
+                    || not_accepting
                 {
                     skipped_closed += 1;
                     return None;
@@ -514,14 +520,23 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         .ok_or_else(|| anyhow::anyhow!("Missing condition_id"))?
         .to_string();
 
-    let tokens = v["tokens"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Missing tokens array"))?;
+    // Check whether the market is currently accepting orders. Markets that
+    // exist in CLOB but have acceptingOrders=false are not tradeable right now
+    // (e.g. closed, awaiting resolution, or pre-open window).
+    if v["accepting_orders"].as_bool() == Some(false)
+        || v["acceptingOrders"].as_bool() == Some(false)
+    {
+        bail!("Market '{}' exists in CLOB but is not accepting orders", slug);
+    }
 
-    let (token_id_up, token_id_down) = extract_token_ids(tokens)?;
+    // Try Format A (tokens array) then Format B (clobTokenIds + outcomes strings).
+    let (token_id_up, token_id_down) = if let Some(tokens) = v["tokens"].as_array() {
+        extract_token_ids(tokens)?
+    } else {
+        extract_token_ids_from_stringified(v)?
+    };
 
-    // Bug fix: use end_date_iso for end time; do NOT fall back to game_start_time
-    // (which is the *start* time — using it as end would give seconds_remaining ≤ 0).
+    // end_date_iso is the correct end time; game_start_time is the *start*.
     let end_date_iso = v["end_date_iso"].as_str().unwrap_or("");
     let end_time = parse_datetime(end_date_iso)?;
 
@@ -530,9 +545,17 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         .and_then(|s| parse_datetime(s).ok())
         .unwrap_or_else(Utc::now);
 
-    // Bug fix: derive MarketType from slug, defaulting to Generic (not FifteenMinute)
     let market_type = market_type_from_slug(slug);
     let asset = extract_asset_from_slug(slug);
+
+    // Use actual fee rate from CLOB response; btc-updown uses 1000 bps (10%).
+    let fee_rate_bps = v["maker_base_fee"]
+        .as_u64()
+        .or_else(|| v["taker_base_fee"].as_u64())
+        .or_else(|| v["makerBaseFee"].as_u64())
+        .or_else(|| v["takerBaseFee"].as_u64())
+        .map(|f| f as u32)
+        .unwrap_or(200);
 
     Ok(Market {
         condition_id,
@@ -544,7 +567,7 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         end_time,
         market_type,
         asset,
-        fee_rate_bps: 315,
+        fee_rate_bps,
         neg_risk: v["neg_risk"].as_bool().unwrap_or(false),
     })
 }
@@ -561,11 +584,15 @@ fn parse_gamma_market(
         .ok_or_else(|| anyhow::anyhow!("Missing condition_id in gamma response"))?
         .to_string();
 
-    let tokens = v["tokens"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Missing tokens"))?;
-
-    let (token_id_up, token_id_down) = extract_token_ids(tokens)?;
+    // Gamma returns token IDs in one of two formats:
+    //   Format A (events API): tokens array [{outcome, token_id}, ...]
+    //   Format B (markets API): clobTokenIds = "[\"id1\",\"id2\"]" (JSON string)
+    //                           outcomes     = "[\"Up\",\"Down\"]"  (JSON string)
+    let (token_id_up, token_id_down) = if let Some(tokens) = v["tokens"].as_array() {
+        extract_token_ids(tokens)?
+    } else {
+        extract_token_ids_from_stringified(v)?
+    };
 
     let end_date = v["endDate"]
         .as_str()
@@ -573,11 +600,23 @@ fn parse_gamma_market(
         .unwrap_or("");
     let end_time = parse_datetime(end_date)?;
 
-    let start_time = v["startDate"]
+    // eventStartTime is the actual trading-window open time; startDate is market
+    // creation time which is earlier and not the trading window.
+    let start_time = v["eventStartTime"]
         .as_str()
+        .or_else(|| v["startTime"].as_str())
+        .or_else(|| v["startDate"].as_str())
         .or_else(|| v["start_date_iso"].as_str())
         .and_then(|s| parse_datetime(s).ok())
         .unwrap_or_else(Utc::now);
+
+    // Prefer takerBaseFee from the market data; fall back to our default 200 bps
+    // (btc-updown markets use 1000 bps = 10%).
+    let fee_rate_bps = v["takerBaseFee"]
+        .as_u64()
+        .or_else(|| v["makerBaseFee"].as_u64())
+        .map(|f| f as u32)
+        .unwrap_or(200);
 
     Ok(Market {
         condition_id,
@@ -589,7 +628,7 @@ fn parse_gamma_market(
         end_time,
         market_type,
         asset: asset.to_string(),
-        fee_rate_bps: 315,
+        fee_rate_bps,
         neg_risk: v["negRisk"].as_bool().unwrap_or(false),
     })
 }
@@ -632,6 +671,54 @@ fn extract_token_ids(tokens: &[serde_json::Value]) -> Result<(String, String)> {
         } else {
             bail!("Could not extract Up/Down token IDs");
         }
+    }
+
+    Ok((up_id, down_id))
+}
+
+/// Extract token IDs from Gamma's "Format B" where clobTokenIds and outcomes
+/// are stored as JSON-encoded strings rather than proper arrays.
+///
+/// Example Gamma response:
+///   "clobTokenIds": "[\"21184...\", \"45121...\"]"
+///   "outcomes":     "[\"Up\", \"Down\"]"
+fn extract_token_ids_from_stringified(v: &serde_json::Value) -> Result<(String, String)> {
+    let ids_raw = v["clobTokenIds"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing clobTokenIds and tokens in Gamma response"))?;
+    let ids: Vec<String> = serde_json::from_str(ids_raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse clobTokenIds JSON string: {}", e))?;
+
+    let outcomes_raw = v["outcomes"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing outcomes field in Gamma response"))?;
+    let outcomes: Vec<String> = serde_json::from_str(outcomes_raw)
+        .map_err(|e| anyhow::anyhow!("Failed to parse outcomes JSON string: {}", e))?;
+
+    if ids.len() < 2 || outcomes.len() < 2 {
+        bail!(
+            "Expected ≥2 token IDs and outcomes, got ids={} outcomes={}",
+            ids.len(),
+            outcomes.len()
+        );
+    }
+
+    let mut up_id = String::new();
+    let mut down_id = String::new();
+
+    for (outcome, id) in outcomes.iter().zip(ids.iter()) {
+        let o = outcome.to_lowercase();
+        if o.contains("up") || o.contains("higher") || o.contains("yes") {
+            up_id = id.clone();
+        } else if o.contains("down") || o.contains("lower") || o.contains("no") {
+            down_id = id.clone();
+        }
+    }
+
+    if up_id.is_empty() || down_id.is_empty() {
+        // Fallback positional: index 0 = Up, index 1 = Down
+        up_id = ids[0].clone();
+        down_id = ids[1].clone();
     }
 
     Ok((up_id, down_id))
@@ -827,5 +914,47 @@ mod tests {
     #[test]
     fn test_parse_datetime_garbage_fails() {
         assert!(parse_datetime("not-a-date").is_err());
+    }
+
+    #[test]
+    fn test_extract_token_ids_from_stringified() {
+        // Mirrors the real btc-updown-15m Gamma response format
+        let v = serde_json::json!({
+            "clobTokenIds": "[\"21184606377798540774527844593078494252416073470315245229442696895085648902685\", \"45121060453856693952230534427185255991290087022355829448310387271787735075443\"]",
+            "outcomes": "[\"Up\", \"Down\"]"
+        });
+        let (up, down) = extract_token_ids_from_stringified(&v).unwrap();
+        assert_eq!(up, "21184606377798540774527844593078494252416073470315245229442696895085648902685");
+        assert_eq!(down, "45121060453856693952230534427185255991290087022355829448310387271787735075443");
+    }
+
+    #[test]
+    fn test_extract_token_ids_from_stringified_yes_no() {
+        let v = serde_json::json!({
+            "clobTokenIds": "[\"aaa\", \"bbb\"]",
+            "outcomes": "[\"Yes\", \"No\"]"
+        });
+        let (up, down) = extract_token_ids_from_stringified(&v).unwrap();
+        assert_eq!(up, "aaa");
+        assert_eq!(down, "bbb");
+    }
+
+    #[test]
+    fn test_gamma_fee_rate_from_market_data() {
+        // btc-updown markets report 1000 bps (10%)
+        let v = serde_json::json!({
+            "condition_id": "0xabc",
+            "conditionId": "0xabc",
+            "clobTokenIds": "[\"111\", \"222\"]",
+            "outcomes": "[\"Up\", \"Down\"]",
+            "endDate": "2026-04-01T12:00:00Z",
+            "startDate": "2026-04-01T11:45:00Z",
+            "takerBaseFee": 1000,
+            "negRisk": false
+        });
+        let m = parse_gamma_market(&v, "btc-updown-15m-1234567890", MarketType::FifteenMinute, "BTC").unwrap();
+        assert_eq!(m.fee_rate_bps, 1000);
+        assert_eq!(m.token_id_up, "111");
+        assert_eq!(m.token_id_down, "222");
     }
 }

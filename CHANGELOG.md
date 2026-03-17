@@ -11,6 +11,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.6] - 2026-03-17
+
+### Fixed
+
+- **Market parser fails on real btc-updown Gamma response format**
+  (`src/market_discovery/mod.rs`)
+
+  Gamma `/markets` returns token data as **JSON-encoded strings**, not arrays:
+  ```json
+  "clobTokenIds": "[\"21184...\", \"45121...\"]",
+  "outcomes":     "[\"Up\", \"Down\"]"
+  ```
+  No `tokens` array is present. Both parsers required `tokens` and silently
+  skipped every btc-updown market with `Err("Missing tokens")`.
+
+  **Fix:** Added `extract_token_ids_from_stringified()`. Both `parse_gamma_market`
+  and `parse_clob_market` now try `tokens` array first, then fall back to the
+  stringified format. 3 new unit tests added.
+
+- **Hardcoded 315 bps fee rate wrong for btc-updown markets**
+
+  btc-updown markets use `takerBaseFee` = **1000 bps** (10%). Quoting at 315
+  bps makes spreads too tight relative to actual cost.
+
+  **Fix:** Both parsers read `takerBaseFee`/`makerBaseFee` from the response.
+  Default falls back to 200 bps only when the field is absent.
+
+- **Pre-open markets (acceptingOrders=false) not filtered in Gamma stage**
+
+  Markets in a pre-open or closed state passed the Gamma filter and wasted
+  CLOB lookups.
+
+  **Fix:** `gamma_candidates()` skips markets where `acceptingOrders` is
+  explicitly `false`. `parse_clob_market()` returns `Err` if CLOB confirms
+  the market is not accepting orders.
+
+- **`start_time` set to market creation date instead of trading-window open**
+
+  `parse_gamma_market` used `startDate` (creation date, days earlier) instead
+  of `eventStartTime`/`startTime` (trading window open). This inflated
+  `actual_duration_secs()`.
+
+  **Fix:** Parser now prefers `eventStartTime` → `startTime` → `startDate`.
+
+---
+
 ## [0.4.5] - 2026-03-17
 
 ### Fixed
