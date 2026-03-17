@@ -322,10 +322,23 @@ impl MarketDiscovery {
             bail!("No markets returned from Gamma for keyword '{}'", keyword);
         }
 
+        // Relevance guard terms (case-insensitive): market question or slug must
+        // contain at least one. Prevents Gamma's fuzzy search from returning
+        // unrelated markets (e.g. "russia-ukraine-ceasefire-before-gta-vi" matched
+        // "Will Bitcoin" because the Gamma search is not phrase-exact).
+        let require_terms: Vec<String> = self
+            .config
+            .strategy
+            .keyword_require_match
+            .iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+
         let now = Utc::now();
         let mut skipped_closed: usize = 0;
         let mut skipped_no_date: usize = 0;
         let mut skipped_expired: usize = 0;
+        let mut skipped_irrelevant: usize = 0;
 
         let mut candidates: Vec<(i64, serde_json::Value, String)> = markets
             .iter()
@@ -338,6 +351,23 @@ impl MarketDiscovery {
                 {
                     skipped_closed += 1;
                     return None;
+                }
+
+                // Relevance check: question or slug must contain at least one required term
+                if !require_terms.is_empty() {
+                    let question_lc = m["question"].as_str().unwrap_or("").to_lowercase();
+                    let slug_lc = slug.to_lowercase();
+                    let relevant = require_terms
+                        .iter()
+                        .any(|t| question_lc.contains(t.as_str()) || slug_lc.contains(t.as_str()));
+                    if !relevant {
+                        debug!(
+                            "Skipping irrelevant market '{}' (no match for {:?})",
+                            slug, require_terms
+                        );
+                        skipped_irrelevant += 1;
+                        return None;
+                    }
                 }
 
                 let end_str = m["endDate"]
@@ -367,10 +397,11 @@ impl MarketDiscovery {
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
         debug!(
-            "Gamma '{}': {} total, {} closed, {} bad-date, {} <{}s → {} candidates",
+            "Gamma '{}': {} total, {} closed, {} irrelevant, {} bad-date, {} <{}s → {} candidates",
             keyword,
             markets.len(),
             skipped_closed,
+            skipped_irrelevant,
             skipped_no_date,
             skipped_expired,
             min_secs,

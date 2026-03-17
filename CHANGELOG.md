@@ -11,6 +11,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.2] - 2026-03-17
+
+### Fixed
+
+- **Bot selected irrelevant market `russia-ukraine-ceasefire-before-gta-vi`**
+  (`src/market_discovery/mod.rs`, `src/config/mod.rs`, `config.toml`)
+
+  After the v0.4.1 condition_id fix, Tier 3 CLOB verification started working for
+  generic markets — but Gamma's `?q=` search is fuzzy/semantic and returned
+  unrelated markets that contained no BTC terms. The "Will Bitcoin" query matched
+  the Russia-Ukraine ceasefire market (likely due to shared event-prediction phrasing
+  like "before GTA VI"). The bot picked the first CLOB-verified candidate, which
+  was this unrelated market.
+
+  **Fix:** Added a relevance guard in `gamma_candidates()`. A Gamma candidate is
+  now kept only if its question text **or** slug contains at least one term from
+  `keyword_require_match` (case-insensitive). Default: `["bitcoin", "btc"]`.
+  Any market without "bitcoin" or "btc" in its question/slug is discarded before
+  CLOB verification, so only genuinely BTC-related markets are ever traded.
+
+  ```toml
+  # config.toml — configurable, set to [] to disable
+  keyword_require_match = ["bitcoin", "btc"]
+  ```
+
+- **403 Forbidden on order placement gives no actionable info**
+  (`src/execution/mod.rs`)
+
+  A missing API credential (empty `POLY_API_KEY` / `POLY_API_SECRET` / etc.)
+  caused silent 403 failures logged only as "Quote refresh error: 403 Forbidden"
+  with no explanation.
+
+  **Fix 1:** `ExecutionEngine::new()` now checks for empty credentials in live
+  mode at startup and logs a `WARN` listing the missing env vars + directions to
+  the Polymarket API keys page.
+
+  **Fix 2:** `place_order()` intercepts HTTP 403 specifically and logs:
+  ```
+  [WARN] Order placement returned 403 Forbidden — API credentials invalid or missing.
+         Required env vars: POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE, POLY_FUNDER_ADDRESS
+         Get credentials from: https://polymarket.com/profile?tab=api-keys
+  ```
+
+### Added
+
+- `StrategyConfig.keyword_require_match: Vec<String>` (default `["bitcoin", "btc"]`)
+  — relevance guard for Gamma keyword search results. Configurable in `config.toml`.
+
+---
+
 ## [0.4.1] - 2026-03-17
 
 ### Fixed
@@ -429,7 +479,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...v0.3.3

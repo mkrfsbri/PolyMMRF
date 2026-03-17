@@ -124,6 +124,12 @@ pub struct StrategyConfig {
     /// Must be > pre_settlement_cancel_secs. Default: 120s.
     #[serde(default = "default_min_market_secs")]
     pub min_market_secs_remaining: i64,
+    /// Relevance guard: a Gamma candidate is only considered if its question or
+    /// slug contains at least one of these terms (case-insensitive).
+    /// Prevents Gamma's fuzzy search from matching unrelated markets.
+    /// Default: ["bitcoin", "btc"]
+    #[serde(default = "default_keyword_require_match")]
+    pub keyword_require_match: Vec<String>,
 }
 
 fn default_market_types() -> Vec<String> {
@@ -136,6 +142,10 @@ fn default_keyword_search() -> String {
 
 fn default_keyword_fallbacks() -> Vec<String> {
     vec!["Bitcoin price".into(), "BTC price".into()]
+}
+
+fn default_keyword_require_match() -> Vec<String> {
+    vec!["bitcoin".into(), "btc".into()]
 }
 
 fn default_min_market_secs() -> i64 {
@@ -161,6 +171,7 @@ impl Default for StrategyConfig {
             keyword_search: "Will Bitcoin".into(),
             keyword_fallbacks: default_keyword_fallbacks(),
             min_market_secs_remaining: 120,
+            keyword_require_match: default_keyword_require_match(),
         }
     }
 }

@@ -29,6 +29,29 @@ impl ExecutionEngine {
             .timeout(Duration::from_secs(10))
             .build()?;
 
+        // Warn early if running live with missing credentials
+        if !simulation {
+            let missing: Vec<&str> = [
+                ("POLY_API_KEY", credentials.api_key.is_empty()),
+                ("POLY_API_SECRET", credentials.api_secret.is_empty()),
+                ("POLY_API_PASSPHRASE", credentials.api_passphrase.is_empty()),
+                ("POLY_FUNDER_ADDRESS", credentials.address.is_empty()),
+            ]
+            .iter()
+            .filter_map(|(name, empty)| if *empty { Some(*name) } else { None })
+            .collect();
+
+            if !missing.is_empty() {
+                warn!(
+                    "LIVE TRADING: missing API credentials: {:?}\n  \
+                     Orders will fail with 403 Forbidden until these are set.\n  \
+                     Set them via environment variables or in .env file.\n  \
+                     Use `simulation = true` in config.toml to test without credentials.",
+                    missing
+                );
+            }
+        }
+
         Ok(Self {
             config,
             client,
@@ -79,7 +102,16 @@ impl ExecutionEngine {
             request = request.header(k.as_str(), v.as_str());
         }
 
-        let resp = request.send().await?.error_for_status()?;
+        let http_resp = request.send().await?;
+        if http_resp.status() == reqwest::StatusCode::FORBIDDEN {
+            warn!(
+                "Order placement returned 403 Forbidden — API credentials invalid or missing.\n  \
+                 Required env vars: POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE, POLY_FUNDER_ADDRESS\n  \
+                 Get credentials from: https://polymarket.com/profile?tab=api-keys\n  \
+                 Set simulation = true in config.toml to test without credentials."
+            );
+        }
+        let resp = http_resp.error_for_status()?;
         let v: serde_json::Value = resp.json().await?;
 
         let order_id = v["orderID"]
