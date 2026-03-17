@@ -1,5 +1,8 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as B64, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -49,7 +52,19 @@ pub fn build_hmac_signature(
     path: &str,
     body: &str,
 ) -> Result<String> {
-    let key_bytes = B64.decode(secret)?;
+    // Polymarket API secrets may be standard base64, URL-safe base64, or raw strings.
+    // Try each variant; fall back to raw bytes so we never hard-fail on format.
+    let key_bytes = B64
+        .decode(secret)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(secret))
+        .or_else(|_| URL_SAFE.decode(secret))
+        .unwrap_or_else(|_| {
+            debug!(
+                "POLY_API_SECRET is not valid base64 — using raw bytes as HMAC key. \
+                 Verify the secret at https://polymarket.com/profile?tab=api-keys"
+            );
+            secret.as_bytes().to_vec()
+        });
     let message = format!("{}{}{}{}", timestamp, method, path, body);
 
     let mut mac = Hmac::<Sha256>::new_from_slice(&key_bytes)?;
