@@ -11,6 +11,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.3] - 2026-03-17
+
+### Fixed
+
+- **`market_type = "generic"` in `config.toml` silently disabled BTC up/down slug discovery**
+  (`config.toml`)
+
+  The bot is designed to trade `btc-updown-5m` and `btc-updown-15m` window markets.
+  These are targeted via a **three-tier discovery** path:
+
+  | Tier | Description |
+  |------|-------------|
+  | 1 | Pinned `market_slug` in config (highest priority) |
+  | 2 | Computed window slug — `btc-updown-5m-{ts}` / `btc-updown-15m-{ts}` |
+  | 3 | Gamma keyword search, CLOB-verified (fallback only) |
+
+  Tier 2 is **only active** when `market_type` is `"5m"` or `"15m"`. The previous
+  default of `"generic"` skipped Tier 2 entirely, meaning the bot never attempted
+  the canonical `btc-updown-{5m|15m}-{window_timestamp}` slugs and went straight
+  to generic keyword search.
+
+  **Fix:** Changed default `market_type` from `"generic"` to `"5m"`. The bot now
+  tries `btc-updown-5m-{ts}` first on every cycle. Switch to `"15m"` for the
+  15-minute window variant. Tier 3 keyword search remains as a fallback for when
+  Polymarket's fixed-window markets are temporarily unavailable.
+
+### Changed
+
+- `config.toml`: `market_type` default changed from `"generic"` to `"5m"`.
+- `config.toml`: Expanded `[strategy]` comments to document the three-tier discovery
+  order and clarify when each tier is active.
+- `config.toml`: `market_slug` example updated to show a BTC up/down slug
+  (`btc-updown-5m-1773723900`) instead of a generic example.
+
+---
+
 ## [0.3.2] - 2026-03-17
 
 ### Fixed
@@ -314,7 +350,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.2.0...v0.3.0

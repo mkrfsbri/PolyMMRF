@@ -60,27 +60,35 @@ inventory_skew_threshold = 0.10
 # Max skew adjustment per side (price units)
 inventory_skew_amount    = 0.02
 # Market discovery hint: "5m", "15m", or "generic"
-# "5m" / "15m" try the old btc-updown window-slug first then fall back.
-# "generic" skips slug generation and goes straight to keyword_search.
-market_type          = "generic"
+# "5m"  → Tier 2 tries btc-updown-5m-{ts} first, then falls back to keyword search.
+# "15m" → Tier 2 tries btc-updown-15m-{ts} first, then falls back to keyword search.
+# "generic" → skips slug computation and goes straight to keyword_search.
+# This bot targets BTC up/down window markets — use "5m" or "15m" as primary.
+market_type          = "5m"
 # Assets to trade
 assets               = ["BTC"]
 # Post-only orders (maker rebate farming — keep true in production)
 post_only            = true
 
 # ── Market targeting ──────────────────────────────────────────────────────────
-# Option A: pin a specific market by its exact Polymarket slug (highest priority)
+# Discovery order:
+#   1. market_slug (if set)             — exact pinned market
+#   2. Computed window slug             — btc-updown-5m-{ts} / btc-updown-15m-{ts}
+#   3. keyword_search + keyword_fallbacks — Gamma full-text search, CLOB-verified
+#
+# Option A: pin a specific market by its exact Polymarket slug (highest priority).
 # Uncomment and set to the slug shown in the Polymarket URL, e.g.:
-#   https://polymarket.com/event/will-btc-be-above-90k-on-jan-1
-# market_slug = "will-btc-be-above-90k-on-jan-1"
+#   https://polymarket.com/event/btc-updown-5m-1773723900
+# market_slug = "btc-updown-5m-1773723900"
 
-# Option B (default): keyword search — Gamma API full-text search.
-# Use a specific phrase to avoid novelty/meme markets (e.g. "Will Bitcoin" targets
-# price-prediction markets, while bare "BTC" also matches "Will Bitcoin hit $1M before GTA VI").
+# Option B (Tier 3 fallback): keyword search — Gamma API full-text search.
+# Only reached when Tier 1 and Tier 2 both fail (i.e. btc-updown window slugs
+# are not live on CLOB). Targets structured BTC price-prediction markets and
+# filters out novelty/meme markets.
 keyword_search       = "Will Bitcoin"
 
-# Fallback keywords tried in order if keyword_search finds no CLOB-active market.
-# Each triggers a separate Gamma API query.
+# Additional fallback keywords tried in order if keyword_search finds no active
+# CLOB market. Each triggers a separate Gamma API query.
 keyword_fallbacks    = ["Bitcoin price", "BTC price"]
 
 # Minimum seconds a market must have remaining before the bot enters it.
