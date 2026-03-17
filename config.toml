@@ -92,6 +92,13 @@ keyword_search       = "Will Bitcoin"
 # CLOB market. Each triggers a separate Gamma API query.
 keyword_fallbacks    = ["Bitcoin price", "BTC price"]
 
+# Relevance guard: a market returned by Gamma keyword search is only kept if its
+# question text or slug contains at least one of these terms (case-insensitive).
+# Gamma's search is fuzzy and can return unrelated markets (e.g. "russia-ukraine
+# ceasefire" appeared when searching "Will Bitcoin" due to shared event phrasing).
+# Set to [] to disable the filter and accept all Gamma results.
+keyword_require_match = ["bitcoin", "btc"]
+
 # Minimum seconds a market must have remaining before the bot enters it.
 # Must be greater than pre_settlement_cancel_secs (currently 10).
 # Increase for longer-duration markets (e.g. 3600 for hourly markets).
