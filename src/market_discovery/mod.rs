@@ -116,37 +116,70 @@ impl MarketDiscovery {
         };
 
         for keyword in &keywords {
-            info!(
-                "Searching Gamma API with keyword: '{}'",
-                keyword
-            );
+            info!("Searching Gamma API with keyword: '{}'", keyword);
             match self.gamma_candidates(keyword, market_type).await {
                 Ok(candidates) if !candidates.is_empty() => {
                     let total = candidates.len();
-                    // Try each candidate in order of most-time-remaining; the first
-                    // one that is also live in the CLOB API is the market we use.
-                    for (secs, _market_json, slug) in candidates {
-                        match self.fetch_from_clob(&slug).await {
-                            Ok(clob_market) => {
-                                info!(
-                                    "Keyword '{}' → '{}' verified in CLOB ({}s / {:.1}h remaining)",
-                                    keyword,
-                                    slug,
-                                    secs,
-                                    secs as f64 / 3600.0,
-                                );
-                                return Ok(clob_market);
+                    info!("Keyword '{}': {} candidates, verifying against CLOB...", keyword, total);
+
+                    // Try each candidate. The CLOB API accepts condition_id in its path
+                    // (GET /markets/{condition_id}) for generic markets — slug-based routing
+                    // only works for special Polymarket market types (e.g. btc-updown).
+                    // We try condition_id first, then fall back to slug.
+                    for (secs, market_json, slug) in candidates {
+                        let condition_id = market_json["conditionId"]
+                            .as_str()
+                            .or_else(|| market_json["condition_id"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        // Try 1: condition_id lookup (works for all market types)
+                        let clob_result = if !condition_id.is_empty() {
+                            match self.fetch_from_clob_by_condition_id(&condition_id, &slug).await {
+                                Ok(m) => Some(m),
+                                Err(e) => {
+                                    debug!(
+                                        "CLOB lookup by condition_id '{}' failed: {}",
+                                        condition_id, e
+                                    );
+                                    None
+                                }
                             }
-                            Err(e) => {
-                                debug!(
-                                    "Keyword '{}' → '{}' not in CLOB ({}), skipping",
-                                    keyword, slug, e
-                                );
-                            }
+                        } else {
+                            None
+                        };
+
+                        // Try 2: slug lookup (fallback; works for btc-updown style slugs)
+                        let clob_result = match clob_result {
+                            Some(m) => Some(m),
+                            None => match self.fetch_from_clob(&slug).await {
+                                Ok(m) => Some(m),
+                                Err(e) => {
+                                    info!(
+                                        "  ✗ '{}' (cid={}) not in CLOB: {}",
+                                        slug,
+                                        if condition_id.is_empty() { "?" } else { &condition_id[..condition_id.len().min(10)] },
+                                        e
+                                    );
+                                    None
+                                }
+                            },
+                        };
+
+                        if let Some(clob_market) = clob_result {
+                            info!(
+                                "Keyword '{}' → '{}' verified in CLOB ({}s / {:.1}h remaining)",
+                                keyword,
+                                slug,
+                                secs,
+                                secs as f64 / 3600.0,
+                            );
+                            return Ok(clob_market);
                         }
                     }
                     warn!(
-                        "Keyword '{}': {} Gamma candidates found but none are active in CLOB",
+                        "Keyword '{}': {} candidates found but none are active in CLOB \
+                         (run with RUST_LOG=debug for per-slug details)",
                         keyword, total
                     );
                 }
@@ -162,7 +195,8 @@ impl MarketDiscovery {
         )
     }
 
-    // ── CLOB lookup by exact slug ────────────────────────────────────────────
+    // ── CLOB lookup by slug ──────────────────────────────────────────────────
+    // Works for btc-updown-style markets that have slug-based CLOB routing.
 
     async fn fetch_from_clob(&self, slug: &str) -> Result<Market> {
         let url = format!("{}/markets/{}", self.config.polymarket.clob_api_url, slug);
@@ -176,6 +210,36 @@ impl MarketDiscovery {
             .await?;
 
         parse_clob_market(&resp, slug)
+    }
+
+    // ── CLOB lookup by condition_id ──────────────────────────────────────────
+    // The CLOB API accepts condition_id as the path segment for all market types.
+    // This is the correct lookup method for generic markets found via Gamma search.
+
+    async fn fetch_from_clob_by_condition_id(
+        &self,
+        condition_id: &str,
+        slug: &str,
+    ) -> Result<Market> {
+        let url = format!(
+            "{}/markets/{}",
+            self.config.polymarket.clob_api_url, condition_id
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+
+        // Use the Gamma slug as the canonical slug for our Market struct (the CLOB
+        // response may not include a slug field for generic markets).
+        let effective_slug = resp["market_slug"]
+            .as_str()
+            .unwrap_or(slug);
+        parse_clob_market(&resp, effective_slug)
     }
 
     // ── Gamma lookup by exact slug ───────────────────────────────────────────
