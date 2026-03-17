@@ -106,10 +106,18 @@ pub struct StrategyConfig {
     /// Default: "BTC"
     #[serde(default = "default_keyword_search")]
     pub keyword_search: String,
+    /// Only trade a market if it has at least this many seconds remaining.
+    /// Must be > pre_settlement_cancel_secs. Default: 120s.
+    #[serde(default = "default_min_market_secs")]
+    pub min_market_secs_remaining: i64,
 }
 
 fn default_keyword_search() -> String {
     "BTC".into()
+}
+
+fn default_min_market_secs() -> i64 {
+    120
 }
 
 impl Default for StrategyConfig {
@@ -128,6 +136,7 @@ impl Default for StrategyConfig {
             post_only: true,
             market_slug: None,
             keyword_search: "BTC".into(),
+            min_market_secs_remaining: 120,
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::config::BotConfig;
 use crate::types::{Market, MarketType};
 use anyhow::{bail, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use reqwest::Client;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -192,46 +192,107 @@ impl MarketDiscovery {
         _market_type: MarketType,
         asset: &str,
     ) -> Result<Market> {
-        // Gamma supports ?q= for full-text search
+        let min_secs = self.config.strategy.min_market_secs_remaining;
         let base_url = format!("{}/markets", self.config.polymarket.gamma_api_url);
+
+        // closed=false: only markets not yet resolved (more reliable than active=true)
+        // limit=50: cast a wider net so near-expiry markets don't crowd out future ones
         let resp = self
             .client
             .get(&base_url)
-            .query(&[("active", "true"), ("q", keyword), ("limit", "20")])
+            .query(&[
+                ("closed", "false"),
+                ("q", keyword),
+                ("limit", "50"),
+            ])
             .send()
             .await?
             .error_for_status()?
             .json::<serde_json::Value>()
             .await?;
 
-        let markets = resp.as_array().ok_or_else(|| anyhow::anyhow!("Not an array"))?;
+        // Gamma may return a plain array OR {"count": N, "data": [...]}
+        let markets_val = if resp.is_array() {
+            resp.clone()
+        } else if let Some(arr) = resp.get("data").or_else(|| resp.get("results")) {
+            arr.clone()
+        } else {
+            bail!("Unrecognised Gamma API response shape: {}", &resp.to_string()[..200.min(resp.to_string().len())]);
+        };
+        let markets = markets_val
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Gamma markets field is not an array"))?;
+
         if markets.is_empty() {
-            bail!("No active markets found for keyword '{}'", keyword);
+            bail!("No markets returned from Gamma for keyword '{}'", keyword);
         }
 
-        // Pick the market with the most time remaining (best window for quoting)
-        let best = markets
+        // Score each market: needs valid end_date, must still be open (accepting orders),
+        // and must have at least min_secs remaining.
+        let now = Utc::now();
+        let mut skipped_expired: usize = 0;
+        let mut skipped_no_date: usize = 0;
+        let mut skipped_closed: usize = 0;
+
+        let candidates: Vec<(i64, &serde_json::Value, String)> = markets
             .iter()
             .filter_map(|m| {
                 let slug = m["slug"].as_str()?;
-                let end_date = m["endDate"]
-                    .as_str()
-                    .or_else(|| m["end_date_iso"].as_str())?;
-                let end_time = parse_datetime(end_date).ok()?;
-                let secs_left = (end_time - Utc::now()).num_seconds();
-                if secs_left > 30 { Some((secs_left, m, slug.to_string())) } else { None }
-            })
-            .max_by_key(|(secs, _, _)| *secs);
 
-        match best {
+                // Skip markets that are explicitly closed/resolved
+                if m["closed"].as_bool().unwrap_or(false)
+                    || m["resolved"].as_bool().unwrap_or(false)
+                    || m["archived"].as_bool().unwrap_or(false)
+                {
+                    skipped_closed += 1;
+                    return None;
+                }
+
+                let end_str = m["endDate"]
+                    .as_str()
+                    .or_else(|| m["end_date_iso"].as_str())
+                    .or_else(|| m["end_time"].as_str())?;
+
+                let end_time = match parse_datetime(end_str) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        skipped_no_date += 1;
+                        return None;
+                    }
+                };
+
+                let secs_left = (end_time - now).num_seconds();
+                if secs_left <= min_secs {
+                    skipped_expired += 1;
+                    return None;
+                }
+
+                Some((secs_left, m, slug.to_string()))
+            })
+            .collect();
+
+        debug!(
+            "Gamma keyword '{}': {} returned, {} closed/archived, {} bad-date, {} <{}s, {} eligible",
+            keyword,
+            markets.len(),
+            skipped_closed,
+            skipped_no_date,
+            skipped_expired,
+            min_secs,
+            candidates.len(),
+        );
+
+        match candidates.into_iter().max_by_key(|(secs, _, _)| *secs) {
             Some((secs, market_json, slug)) => {
                 info!(
-                    "Keyword '{}' matched market '{}' ({}s remaining)",
-                    keyword, slug, secs
+                    "Keyword '{}' matched '{}' ({}s / {:.1}h remaining)",
+                    keyword,
+                    slug,
+                    secs,
+                    secs as f64 / 3600.0,
                 );
                 let mt = market_type_from_slug(&slug);
                 let discovered_asset = extract_asset_from_slug(&slug);
-                // Use provided asset hint if slug extraction gives a generic result
                 let effective_asset = if discovered_asset.len() > 1 {
                     discovered_asset
                 } else {
@@ -240,8 +301,11 @@ impl MarketDiscovery {
                 parse_gamma_market(market_json, &slug, mt, &effective_asset)
             }
             None => bail!(
-                "All markets matching '{}' have < 30s remaining",
-                keyword
+                "All {} markets matching '{}' are expired/closed or have < {}s remaining. \
+                 Try a broader keyword_search or set market_slug directly in config.toml.",
+                markets.len(),
+                keyword,
+                min_secs,
             ),
         }
     }
@@ -410,19 +474,50 @@ fn extract_token_ids(tokens: &[serde_json::Value]) -> Result<(String, String)> {
     Ok((up_id, down_id))
 }
 
+/// Parse a datetime string from Polymarket APIs.
+///
+/// Handles every format observed in the wild:
+/// 1. RFC 3339 with timezone  — `"2026-03-20T12:00:00Z"` / `"…+00:00"`
+/// 2. ISO 8601 without timezone — `"2026-03-20T12:00:00"` (assume UTC)
+/// 3. Date-only              — `"2026-03-20"` (assume UTC midnight)
+/// 4. Unix timestamp seconds — `"1742947200"` (< 1e12)
+/// 5. Unix timestamp ms      — `"1742947200000"` (≥ 1e12, divide by 1000)
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
+    let s = s.trim();
     if s.is_empty() {
         bail!("Empty datetime string");
     }
-    // Try ISO 8601
+
+    // 1. RFC 3339 with timezone
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(dt.with_timezone(&Utc));
     }
-    // Try unix timestamp
-    if let Ok(ts) = s.parse::<i64>() {
-        return Ok(Utc.timestamp_opt(ts, 0).single().unwrap_or_else(Utc::now));
+
+    // 2. ISO 8601 without timezone (assume UTC)
+    for fmt in &[
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Ok(ndt.and_utc());
+        }
     }
-    bail!("Could not parse datetime: {}", s)
+
+    // 3. Date-only (assume UTC midnight)
+    if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        if let Some(ndt) = d.and_hms_opt(0, 0, 0) {
+            return Ok(ndt.and_utc());
+        }
+    }
+
+    // 4 & 5. Unix timestamp (seconds or milliseconds)
+    if let Ok(n) = s.parse::<i64>() {
+        let ts_secs = if n > 1_000_000_000_000 { n / 1000 } else { n };
+        return Ok(Utc.timestamp_opt(ts_secs, 0).single().unwrap_or_else(Utc::now));
+    }
+
+    bail!("Could not parse datetime: {:?}", s)
 }
 
 fn extract_asset_from_slug(slug: &str) -> String {
@@ -514,5 +609,60 @@ mod tests {
         });
         let m = parse_clob_market(&v, "will-btc-hit-100k").unwrap();
         assert_eq!(m.market_type, MarketType::Generic);
+    }
+
+    // ── parse_datetime regression tests ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_datetime_rfc3339() {
+        let dt = parse_datetime("2026-04-01T12:00:00Z").unwrap();
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 4);
+    }
+
+    #[test]
+    fn test_parse_datetime_no_timezone() {
+        // This is the format that was silently dropped — causes the "< 30s" bug
+        let dt = parse_datetime("2026-04-01T12:00:00").unwrap();
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 4);
+    }
+
+    #[test]
+    fn test_parse_datetime_with_subseconds_no_tz() {
+        let dt = parse_datetime("2026-04-01T12:00:00.000").unwrap();
+        assert_eq!(dt.year(), 2026);
+    }
+
+    #[test]
+    fn test_parse_datetime_date_only() {
+        let dt = parse_datetime("2026-04-01").unwrap();
+        assert_eq!(dt.year(), 2026);
+        assert_eq!(dt.month(), 4);
+        assert_eq!(dt.day(), 1);
+    }
+
+    #[test]
+    fn test_parse_datetime_unix_seconds() {
+        // 1743465600 = 2025-04-01T00:00:00Z (approx)
+        let dt = parse_datetime("1743465600").unwrap();
+        assert_eq!(dt.year(), 2025);
+    }
+
+    #[test]
+    fn test_parse_datetime_unix_milliseconds() {
+        // 1743465600000 ms = same date as above
+        let dt = parse_datetime("1743465600000").unwrap();
+        assert_eq!(dt.year(), 2025);
+    }
+
+    #[test]
+    fn test_parse_datetime_empty_fails() {
+        assert!(parse_datetime("").is_err());
+    }
+
+    #[test]
+    fn test_parse_datetime_garbage_fails() {
+        assert!(parse_datetime("not-a-date").is_err());
     }
 }

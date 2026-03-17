@@ -78,6 +78,11 @@ post_only            = true
 # for this string (case-insensitive). The market with the most time remaining wins.
 keyword_search       = "BTC"
 
+# Minimum seconds a market must have remaining before the bot enters it.
+# Must be greater than pre_settlement_cancel_secs (currently 10).
+# Increase for longer-duration markets (e.g. 3600 for hourly markets).
+min_market_secs_remaining = 120
+
 [risk]
 # Total trading bankroll in USDC
 bankroll             = 1000.0

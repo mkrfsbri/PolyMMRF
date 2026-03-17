@@ -11,6 +11,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.1] - 2026-03-17
+
+### Fixed
+
+- **[Critical] `parse_datetime` silently dropped all Gamma API markets, causing "All markets
+  matching 'BTC' have < 30s remaining"** (`src/market_discovery/mod.rs`)
+
+  The root cause: Polymarket Gamma API returns dates in ISO 8601 *without* a timezone suffix
+  (e.g. `"2026-04-01T00:00:00"` instead of `"2026-04-01T00:00:00Z"`). The old parser only
+  handled RFC 3339 and Unix integer strings. Non-RFC-3339 strings hit `bail!`, `filter_map`
+  returned `None` for every valid future market, and only markets with unix-integer `endDate`
+  remained — all of which happened to be expired.
+
+  `parse_datetime` now handles 5 formats in order:
+  1. RFC 3339 with timezone (`"…Z"` / `"…+00:00"`)
+  2. ISO 8601 without timezone (`"2026-04-01T12:00:00"`) — **the previously broken case**
+  3. ISO 8601 with subseconds (`"2026-04-01T12:00:00.000"`)
+  4. Date-only (`"2026-04-01"`) — assume UTC midnight
+  5. Unix seconds (`"1742947200"`) and milliseconds (`"1743465600000"`, auto-detected by > 1e12)
+
+- **`fetch_from_gamma_by_keyword` improvements:**
+  - Changed `?active=true` → `?closed=false` so markets that Polymarket has marked active
+    but are in a transient state (e.g. just-created, paused) are also considered.
+  - Increased result limit from `20` → `50` to reduce the chance that near-expiry markets
+    crowd out long-running future markets.
+  - Added handling for wrapped Gamma response `{"data": [...]}` / `{"results": [...]}` in
+    addition to the raw array format — prevents a silent `Err("Not an array")` crash if
+    Polymarket changes the response envelope.
+  - Now filters on `closed`, `resolved`, and `archived` fields before date parsing.
+  - Debug log now shows breakdown: `N returned, X closed, Y bad-date, Z <Xs, W eligible`.
+  - Error message now includes total market count and the configured minimum threshold so
+    operators know exactly what to change.
+
+- **`wait_for_market` hardcoded `> 30s` threshold** replaced by
+  `config.strategy.min_market_secs_remaining` (default `120`).
+
+### Added
+
+- **`[strategy] min_market_secs_remaining`** (`config.toml`, default `120`) — only enter
+  a market if it has at least this many seconds remaining. Prevents the bot from entering
+  markets that would immediately trigger pre-settlement cancel. Set higher (e.g. `3600`)
+  for hourly+ duration markets.
+
+- **8 new `parse_datetime` unit tests** covering all supported formats and error cases
+  (35 tests total, all passing).
+
+---
+
 ## [0.3.0] - 2026-03-17
 
 ### Fixed
@@ -214,7 +262,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mkrfsbri/PolyMMRF/releases/tag/v0.1.0
