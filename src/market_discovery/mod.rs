@@ -115,9 +115,43 @@ impl MarketDiscovery {
             kws
         };
 
+        // Preferred max duration for short-term market types.
+        // If no market is found within this window, a second pass runs without
+        // the cap so the worker can still trade longer-duration BTC markets
+        // when 5m/15m are not listed on Polymarket.
+        let preferred_max_secs: i64 = match market_type {
+            MarketType::FiveMinute => 3_600,
+            MarketType::FifteenMinute => 7_200,
+            MarketType::Generic => i64::MAX,
+        };
+
+        // Run Tier 3 up to twice: first with preferred duration cap, then (if
+        // nothing found) without cap so a long-duration BTC market can be used
+        // as a stand-in when 5m/15m markets are inactive on Polymarket.
+        let duration_caps: &[i64] = if preferred_max_secs == i64::MAX {
+            &[i64::MAX]
+        } else {
+            &[preferred_max_secs, i64::MAX]
+        };
+        let market_type_label = match market_type {
+            MarketType::FiveMinute => "5m",
+            MarketType::FifteenMinute => "15m",
+            MarketType::Generic => "generic",
+        };
+
+        for (pass, &max_dur) in duration_caps.iter().enumerate() {
+            if pass == 1 {
+                warn!(
+                    "[{}] No short-duration BTC market found (btc-updown-5m/15m are not active). \
+                     Falling back to any BTC prediction market — quotes will be placed on a \
+                     longer-duration market until the dedicated windows return.",
+                    market_type_label
+                );
+            }
+
         for keyword in &keywords {
             info!("Searching Gamma API with keyword: '{}'", keyword);
-            match self.gamma_candidates(keyword, market_type).await {
+            match self.gamma_candidates(keyword, market_type, max_dur).await {
                 Ok(candidates) if !candidates.is_empty() => {
                     let total = candidates.len();
                     info!("Keyword '{}': {} candidates, verifying against CLOB...", keyword, total);
@@ -187,6 +221,7 @@ impl MarketDiscovery {
                 Err(e) => debug!("Keyword search '{}' failed: {}", keyword, e),
             }
         }
+        } // end duration_caps loop
 
         bail!(
             "No active market found after trying keywords {:?}. \
@@ -288,17 +323,11 @@ impl MarketDiscovery {
         &self,
         keyword: &str,
         market_type: MarketType,
+        max_duration_secs: i64,
     ) -> Result<Vec<(i64, serde_json::Value, String)>> {
         let min_secs = self.config.strategy.min_market_secs_remaining;
 
-        // For short-term market types, cap max duration to avoid picking up
-        // long-running novelty/speculative markets (e.g. "will-bitcoin-hit-1m-before-gta-vi"
-        // has months remaining and would be wrong for a 5m/15m worker).
-        let max_secs: i64 = match market_type {
-            MarketType::FiveMinute => 3_600,    // 1 hour — covers a few 5-min windows
-            MarketType::FifteenMinute => 7_200, // 2 hours — covers several 15-min windows
-            MarketType::Generic => i64::MAX,    // no cap for generic workers
-        };
+        let max_secs = max_duration_secs;
         let base_url = format!("{}/markets", self.config.polymarket.gamma_api_url);
 
         // closed=false: only unresolved markets; limit=50: wider net

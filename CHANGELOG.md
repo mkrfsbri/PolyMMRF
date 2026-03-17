@@ -11,6 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.5] - 2026-03-17
+
+### Fixed
+
+- **Bot idles forever when no short-duration BTC market exists**
+  (`src/market_discovery/mod.rs`)
+
+  After the v0.4.4 duration cap was added, Tier 3 correctly rejected novelty
+  markets — but when *no* short-duration BTC market exists at all (current
+  Polymarket situation), the worker spun indefinitely with "no market found"
+  instead of trading anything.
+
+  **Fix:** Tier 3 now runs in two passes:
+  1. First pass applies the preferred duration cap (`5m` → 3 600 s, `15m` → 7 200 s).
+  2. If no CLOB-active market is found in pass 1, a second pass with **no
+     duration cap** allows any open BTC prediction market to be used as a
+     stand-in. A `WARN` log is emitted:
+     > `[5m] No short-duration BTC market found (btc-updown-5m/15m are not
+     > active). Falling back to any BTC prediction market…`
+
+  When Polymarket re-lists the dedicated windows, Tier 2 picks them up
+  automatically and this fallback is never reached.
+
+---
+
 ## [0.4.4] - 2026-03-17
 
 ### Fixed
