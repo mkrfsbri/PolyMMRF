@@ -353,16 +353,21 @@ impl MarketDiscovery {
                     return None;
                 }
 
-                // Relevance check: question or slug must contain at least one required term
+                // Relevance check: SLUG must contain at least one required term.
+                // We deliberately check slug only (not question text) because:
+                // - Slugs are machine-generated from the market title and reliably
+                //   identify what the market is about.
+                // - Questions can mention BTC/Bitcoin tangentially in unrelated
+                //   markets (e.g. "Will Russia sign ceasefire before Bitcoin hits $X?")
+                //   which would incorrectly pass a question-based filter.
                 if !require_terms.is_empty() {
-                    let question_lc = m["question"].as_str().unwrap_or("").to_lowercase();
                     let slug_lc = slug.to_lowercase();
                     let relevant = require_terms
                         .iter()
-                        .any(|t| question_lc.contains(t.as_str()) || slug_lc.contains(t.as_str()));
+                        .any(|t| slug_lc.contains(t.as_str()));
                     if !relevant {
                         debug!(
-                            "Skipping irrelevant market '{}' (no match for {:?})",
+                            "Skipping irrelevant market '{}' (slug has no match for {:?})",
                             slug, require_terms
                         );
                         skipped_irrelevant += 1;

@@ -11,6 +11,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.3] - 2026-03-17
+
+### Fixed
+
+- **Relevance filter accepted `russia-ukraine-ceasefire-before-gta-vi-554` again**
+  (`src/market_discovery/mod.rs`)
+
+  The v0.4.2 relevance guard checked both question text AND slug. The Russia-Ukraine
+  market question read something like "Will X happen before Bitcoin hits $Y?" — so
+  it contained "bitcoin" and passed the filter, even though the market has nothing
+  to do with BTC price prediction.
+
+  **Fix:** Changed `gamma_candidates()` to check the **slug only** for required
+  terms. Slugs are machine-generated from the market title and reliably identify
+  what the market is about; question text can mention BTC tangentially in completely
+  unrelated markets. Slug `russia-ukraine-ceasefire-before-gta-vi-554` has no
+  "btc" or "bitcoin" → correctly rejected.
+
+- **Both 5m and 15m workers claimed the same generic market simultaneously**
+  (`src/strategy/market_making.rs`)
+
+  When btc-updown window slugs are unavailable, both workers fall through to Tier 3
+  keyword search and independently select the same best Gamma candidate. Both then
+  register the same market in `current_markets` and place doubled orders on the
+  same token.
+
+  **Fix:** Added a duplicate-market guard in `wait_for_market()`. After a market
+  is found, the worker checks `state.current_markets` for any other worker already
+  trading the same `condition_id`. If one is found, the worker logs a message and
+  sleeps 30 seconds before retrying — it will keep waiting until either a
+  window-specific `btc-updown-{type}-{ts}` market appears, or the other worker's
+  market expires and frees the slot.
+
+---
+
 ## [0.4.2] - 2026-03-17
 
 ### Fixed
@@ -479,7 +514,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...v0.4.0

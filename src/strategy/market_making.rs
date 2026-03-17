@@ -239,6 +239,22 @@ impl MarketMakingStrategy {
                     let remaining = m.seconds_remaining();
                     let min_secs = self.config.strategy.min_market_secs_remaining;
                     if remaining > min_secs {
+                        // Guard: don't claim a market already being traded by another
+                        // worker. This prevents both "5m" and "15m" workers from
+                        // selecting the same Tier-3 generic market simultaneously.
+                        let already_claimed = self.state.current_markets.iter().any(|e| {
+                            e.key() != &self.market_type_str
+                                && e.value().condition_id == m.condition_id
+                        });
+                        if already_claimed {
+                            info!(
+                                "[{}] Market '{}' already claimed by another worker — \
+                                 waiting for a dedicated window market...",
+                                self.market_type_str, m.slug
+                            );
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            continue;
+                        }
                         return m;
                     } else {
                         info!(
