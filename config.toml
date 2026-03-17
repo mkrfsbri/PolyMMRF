@@ -59,12 +59,24 @@ quote_refresh_ms     = 5000
 inventory_skew_threshold = 0.10
 # Max skew adjustment per side (price units)
 inventory_skew_amount    = 0.02
-# Market window: "5m" (300s) or "15m" (900s)
-market_type          = "5m"
+# Market discovery hint: "5m", "15m", or "generic"
+# "5m" / "15m" try the old btc-updown window-slug first then fall back.
+# "generic" skips slug generation and goes straight to keyword_search.
+market_type          = "generic"
 # Assets to trade
 assets               = ["BTC"]
 # Post-only orders (maker rebate farming — keep true in production)
 post_only            = true
+
+# ── Market targeting ──────────────────────────────────────────────────────────
+# Option A: pin a specific market by its exact Polymarket slug (highest priority)
+# Uncomment and set to the slug shown in the Polymarket URL, e.g.:
+#   https://polymarket.com/event/will-btc-be-above-90k-on-jan-1
+# market_slug = "will-btc-be-above-90k-on-jan-1"
+
+# Option B (default): keyword search — Gamma API searches active market titles
+# for this string (case-insensitive). The market with the most time remaining wins.
+keyword_search       = "BTC"
 
 [risk]
 # Total trading bankroll in USDC

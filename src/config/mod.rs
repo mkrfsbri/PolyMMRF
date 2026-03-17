@@ -91,11 +91,25 @@ pub struct StrategyConfig {
     pub inventory_skew_threshold: f64,
     /// Max skew adjustment amount
     pub inventory_skew_amount: f64,
-    /// "5m" or "15m"
+    /// Hint for slug generation: "5m", "15m", or "generic".
+    /// Only used when `market_slug` is not set.
     pub market_type: String,
     /// Assets to trade (e.g. ["BTC"])
     pub assets: Vec<String>,
     pub post_only: bool,
+    /// If set, skip slug calculation and look up this exact market slug directly.
+    /// Example: "will-btc-hit-70k-in-march-2026"
+    #[serde(default)]
+    pub market_slug: Option<String>,
+    /// Gamma API keyword used when slug-based discovery fails.
+    /// Matches against market question/title (case-insensitive contains).
+    /// Default: "BTC"
+    #[serde(default = "default_keyword_search")]
+    pub keyword_search: String,
+}
+
+fn default_keyword_search() -> String {
+    "BTC".into()
 }
 
 impl Default for StrategyConfig {
@@ -112,6 +126,8 @@ impl Default for StrategyConfig {
             market_type: "5m".into(),
             assets: vec!["BTC".into()],
             post_only: true,
+            market_slug: None,
+            keyword_search: "BTC".into(),
         }
     }
 }
@@ -224,9 +240,8 @@ impl BotConfig {
         if self.risk.pre_settlement_cancel_secs < 5 {
             bail!("pre_settlement_cancel_secs must be >= 5s");
         }
-        if s.market_type != "5m" && s.market_type != "15m" {
-            bail!("market_type must be '5m' or '15m'");
-        }
+        // market_type is a hint; "5m", "15m", and "generic" are all valid.
+        // Unknown values default to generic behaviour in market discovery.
         Ok(())
     }
 }

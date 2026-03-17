@@ -37,6 +37,9 @@ impl Outcome {
 pub enum MarketType {
     FiveMinute,
     FifteenMinute,
+    /// Any market that doesn't match a fixed window format.
+    /// Duration is derived from `Market::start_time`..`end_time` at runtime.
+    Generic,
 }
 
 impl MarketType {
@@ -44,6 +47,7 @@ impl MarketType {
         match self {
             MarketType::FiveMinute => 300,
             MarketType::FifteenMinute => 900,
+            MarketType::Generic => 0, // caller must use Market::actual_duration_secs()
         }
     }
 
@@ -51,6 +55,7 @@ impl MarketType {
         match self {
             MarketType::FiveMinute => "5m",
             MarketType::FifteenMinute => "15m",
+            MarketType::Generic => "generic",
         }
     }
 }
@@ -91,6 +96,21 @@ impl Market {
     pub fn seconds_remaining(&self) -> i64 {
         let now = Utc::now();
         (self.end_time - now).num_seconds().max(0)
+    }
+
+    /// Total market duration from open to close.
+    /// Prefers the known `MarketType` constants; falls back to
+    /// `end_time – start_time` for `MarketType::Generic`.
+    pub fn actual_duration_secs(&self) -> i64 {
+        match self.market_type {
+            MarketType::FiveMinute | MarketType::FifteenMinute => {
+                self.market_type.duration_secs()
+            }
+            MarketType::Generic => {
+                let d = (self.end_time - self.start_time).num_seconds();
+                if d > 0 { d } else { 300 } // fallback 5m if times bogus
+            }
+        }
     }
 }
 
