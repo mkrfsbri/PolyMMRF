@@ -11,6 +11,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.2] - 2026-03-17
+
+### Fixed
+
+- **[Critical] Keyword search accepted Gamma markets not available in CLOB API**
+  (`src/market_discovery/mod.rs`)
+
+  The Gamma metadata API lists all markets — including novelty/meme markets
+  (e.g. `will-bitcoin-hit-1m-before-gta-vi`) that have no active order book in the
+  CLOB trading API. The previous code accepted the first Gamma hit as a tradeable
+  market without verifying it exists in CLOB. The bot would then fail silently
+  when trying to subscribe to orderbooks or place orders.
+
+  **Fix:** After Gamma keyword search, candidates are now iterated in
+  most-time-remaining order and each is verified against the CLOB API
+  (`GET /markets/{slug}`). The first slug that returns a valid CLOB response is
+  used. Slugs that 404 on CLOB are skipped with a `debug` log. If no candidate
+  passes CLOB verification, the next fallback keyword is tried.
+
+- **Keyword `"BTC"` too broad — matched novelty markets**
+  Default `keyword_search` changed from `"BTC"` to `"Will Bitcoin"`.
+  "Will Bitcoin" targets structured price-prediction markets (e.g.
+  "Will Bitcoin exceed $80,000 by end of April?") and avoids meme/GTA VI/
+  hypothetical markets that appear when searching bare "BTC".
+
+- **Version banner showed `v0.1.0`** despite being at v0.3.2. Fixed.
+
+### Added
+
+- **`[strategy] keyword_fallbacks`** — ordered list of fallback keyword searches tried
+  when the primary `keyword_search` finds no CLOB-active market.
+  Default: `["Bitcoin price", "BTC price"]`.
+  Each is an independent Gamma API query; the first keyword + CLOB combination
+  that succeeds wins.
+
+- **Config validation**: `min_market_secs_remaining` must be greater than
+  `pre_settlement_cancel_secs`. A config where the bot would enter a market only
+  to immediately trigger pre-settlement cancel now fails at startup with a clear
+  error.
+
+### Changed
+
+- `fetch_from_gamma_by_keyword` refactored into `gamma_candidates` (returns all
+  sorted candidates) + CLOB-verification loop in `find_active_market`.
+  This means CLOB is always the authoritative data source — even when Gamma is
+  used for discovery, the final market struct is populated from the CLOB response.
+
+- `config.toml`: `keyword_search` updated to `"Will Bitcoin"`;
+  `keyword_fallbacks` array added.
+
+---
+
 ## [0.3.1] - 2026-03-17
 
 ### Fixed
@@ -262,7 +314,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.1.0...v0.2.0

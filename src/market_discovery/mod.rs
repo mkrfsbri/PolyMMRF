@@ -107,25 +107,58 @@ impl MarketDiscovery {
             }
         }
 
-        // ── Tier 3: keyword search ───────────────────────────────────────────
-        let keyword = &self.config.strategy.keyword_search;
-        info!(
-            "Slug-based discovery failed. Searching Gamma API with keyword: '{}'",
-            keyword
-        );
-        match self.fetch_from_gamma_by_keyword(keyword, market_type, asset).await {
-            Ok(m) => {
-                info!("Found market via keyword search '{}': {}", keyword, m.slug);
-                return Ok(m);
+        // ── Tier 3: keyword search with CLOB verification ────────────────────
+        let keywords: Vec<String> = {
+            let primary = self.config.strategy.keyword_search.clone();
+            let mut kws = vec![primary];
+            kws.extend(self.config.strategy.keyword_fallbacks.iter().cloned());
+            kws
+        };
+
+        for keyword in &keywords {
+            info!(
+                "Searching Gamma API with keyword: '{}'",
+                keyword
+            );
+            match self.gamma_candidates(keyword, market_type).await {
+                Ok(candidates) if !candidates.is_empty() => {
+                    let total = candidates.len();
+                    // Try each candidate in order of most-time-remaining; the first
+                    // one that is also live in the CLOB API is the market we use.
+                    for (secs, market_json, slug) in candidates {
+                        match self.fetch_from_clob(&slug).await {
+                            Ok(clob_market) => {
+                                info!(
+                                    "Keyword '{}' → '{}' verified in CLOB ({}s / {:.1}h remaining)",
+                                    keyword,
+                                    slug,
+                                    secs,
+                                    secs as f64 / 3600.0,
+                                );
+                                return Ok(clob_market);
+                            }
+                            Err(e) => {
+                                debug!(
+                                    "Keyword '{}' → '{}' not in CLOB ({}), skipping",
+                                    keyword, slug, e
+                                );
+                            }
+                        }
+                    }
+                    warn!(
+                        "Keyword '{}': {} Gamma candidates found but none are active in CLOB",
+                        keyword, total
+                    );
+                }
+                Ok(_) => debug!("Keyword '{}' returned no eligible candidates", keyword),
+                Err(e) => debug!("Keyword search '{}' failed: {}", keyword, e),
             }
-            Err(e) => debug!("Keyword search for '{}' failed: {}", keyword, e),
         }
 
         bail!(
-            "No active market found. Tried slug hint '{}', keyword '{}'. \
-             Set [strategy] market_slug = \"<exact-slug>\" in config.toml to pin a specific market.",
-            asset,
-            keyword
+            "No active market found after trying keywords {:?}. \
+             Tip: set [strategy] market_slug = \"<slug>\" in config.toml to pin a market directly.",
+            keywords
         )
     }
 
@@ -182,29 +215,24 @@ impl MarketDiscovery {
         parse_gamma_market(&markets[0], found_slug, mt, &asset)
     }
 
-    // ── Gamma keyword search (Tier 3 fallback) ───────────────────────────────
+    // ── Gamma keyword search helpers ─────────────────────────────────────────
 
-    /// Search Gamma API for active binary markets whose question contains `keyword`.
-    /// Returns the market with the most time remaining so the bot has a full window.
-    async fn fetch_from_gamma_by_keyword(
+    /// Fetch and filter Gamma markets by keyword. Returns candidates sorted by
+    /// most time remaining (highest first). CLOB availability is NOT checked here —
+    /// callers iterate the list and verify each slug against the CLOB API.
+    async fn gamma_candidates(
         &self,
         keyword: &str,
         _market_type: MarketType,
-        asset: &str,
-    ) -> Result<Market> {
+    ) -> Result<Vec<(i64, serde_json::Value, String)>> {
         let min_secs = self.config.strategy.min_market_secs_remaining;
         let base_url = format!("{}/markets", self.config.polymarket.gamma_api_url);
 
-        // closed=false: only markets not yet resolved (more reliable than active=true)
-        // limit=50: cast a wider net so near-expiry markets don't crowd out future ones
+        // closed=false: only unresolved markets; limit=50: wider net
         let resp = self
             .client
             .get(&base_url)
-            .query(&[
-                ("closed", "false"),
-                ("q", keyword),
-                ("limit", "50"),
-            ])
+            .query(&[("closed", "false"), ("q", keyword), ("limit", "50")])
             .send()
             .await?
             .error_for_status()?
@@ -217,7 +245,10 @@ impl MarketDiscovery {
         } else if let Some(arr) = resp.get("data").or_else(|| resp.get("results")) {
             arr.clone()
         } else {
-            bail!("Unrecognised Gamma API response shape: {}", &resp.to_string()[..200.min(resp.to_string().len())]);
+            bail!(
+                "Unrecognised Gamma response shape: {}",
+                &resp.to_string()[..resp.to_string().len().min(200)]
+            );
         };
         let markets = markets_val
             .as_array()
@@ -227,19 +258,16 @@ impl MarketDiscovery {
             bail!("No markets returned from Gamma for keyword '{}'", keyword);
         }
 
-        // Score each market: needs valid end_date, must still be open (accepting orders),
-        // and must have at least min_secs remaining.
         let now = Utc::now();
-        let mut skipped_expired: usize = 0;
-        let mut skipped_no_date: usize = 0;
         let mut skipped_closed: usize = 0;
+        let mut skipped_no_date: usize = 0;
+        let mut skipped_expired: usize = 0;
 
-        let candidates: Vec<(i64, &serde_json::Value, String)> = markets
+        let mut candidates: Vec<(i64, serde_json::Value, String)> = markets
             .iter()
             .filter_map(|m| {
-                let slug = m["slug"].as_str()?;
+                let slug = m["slug"].as_str()?.to_string();
 
-                // Skip markets that are explicitly closed/resolved
                 if m["closed"].as_bool().unwrap_or(false)
                     || m["resolved"].as_bool().unwrap_or(false)
                     || m["archived"].as_bool().unwrap_or(false)
@@ -267,12 +295,15 @@ impl MarketDiscovery {
                     return None;
                 }
 
-                Some((secs_left, m, slug.to_string()))
+                Some((secs_left, m.clone(), slug))
             })
             .collect();
 
+        // Sort descending: market with most time remaining first
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
         debug!(
-            "Gamma keyword '{}': {} returned, {} closed/archived, {} bad-date, {} <{}s, {} eligible",
+            "Gamma '{}': {} total, {} closed, {} bad-date, {} <{}s → {} candidates",
             keyword,
             markets.len(),
             skipped_closed,
@@ -282,32 +313,7 @@ impl MarketDiscovery {
             candidates.len(),
         );
 
-        match candidates.into_iter().max_by_key(|(secs, _, _)| *secs) {
-            Some((secs, market_json, slug)) => {
-                info!(
-                    "Keyword '{}' matched '{}' ({}s / {:.1}h remaining)",
-                    keyword,
-                    slug,
-                    secs,
-                    secs as f64 / 3600.0,
-                );
-                let mt = market_type_from_slug(&slug);
-                let discovered_asset = extract_asset_from_slug(&slug);
-                let effective_asset = if discovered_asset.len() > 1 {
-                    discovered_asset
-                } else {
-                    asset.to_uppercase()
-                };
-                parse_gamma_market(market_json, &slug, mt, &effective_asset)
-            }
-            None => bail!(
-                "All {} markets matching '{}' are expired/closed or have < {}s remaining. \
-                 Try a broader keyword_search or set market_slug directly in config.toml.",
-                markets.len(),
-                keyword,
-                min_secs,
-            ),
-        }
+        Ok(candidates)
     }
 
     /// Fetch fee rate for a token. Returns default 315 bps if unavailable.

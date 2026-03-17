@@ -101,11 +101,16 @@ pub struct StrategyConfig {
     /// Example: "will-btc-hit-70k-in-march-2026"
     #[serde(default)]
     pub market_slug: Option<String>,
-    /// Gamma API keyword used when slug-based discovery fails.
-    /// Matches against market question/title (case-insensitive contains).
-    /// Default: "BTC"
+    /// Primary Gamma API keyword for market discovery.
+    /// Searched first. Use a specific phrase to avoid novelty/meme markets.
+    /// Example: "Will Bitcoin" finds price prediction markets.
+    /// Default: "Will Bitcoin"
     #[serde(default = "default_keyword_search")]
     pub keyword_search: String,
+    /// Fallback keywords tried in order if `keyword_search` finds no CLOB-active market.
+    /// Each is a separate Gamma API query. Default: ["Bitcoin price", "BTC price"]
+    #[serde(default = "default_keyword_fallbacks")]
+    pub keyword_fallbacks: Vec<String>,
     /// Only trade a market if it has at least this many seconds remaining.
     /// Must be > pre_settlement_cancel_secs. Default: 120s.
     #[serde(default = "default_min_market_secs")]
@@ -113,7 +118,11 @@ pub struct StrategyConfig {
 }
 
 fn default_keyword_search() -> String {
-    "BTC".into()
+    "Will Bitcoin".into()
+}
+
+fn default_keyword_fallbacks() -> Vec<String> {
+    vec!["Bitcoin price".into(), "BTC price".into()]
 }
 
 fn default_min_market_secs() -> i64 {
@@ -135,7 +144,8 @@ impl Default for StrategyConfig {
             assets: vec!["BTC".into()],
             post_only: true,
             market_slug: None,
-            keyword_search: "BTC".into(),
+            keyword_search: "Will Bitcoin".into(),
+            keyword_fallbacks: default_keyword_fallbacks(),
             min_market_secs_remaining: 120,
         }
     }
@@ -248,6 +258,13 @@ impl BotConfig {
         }
         if self.risk.pre_settlement_cancel_secs < 5 {
             bail!("pre_settlement_cancel_secs must be >= 5s");
+        }
+        if s.min_market_secs_remaining <= self.risk.pre_settlement_cancel_secs {
+            bail!(
+                "min_market_secs_remaining ({}) must be greater than pre_settlement_cancel_secs ({})",
+                s.min_market_secs_remaining,
+                self.risk.pre_settlement_cancel_secs
+            );
         }
         // market_type is a hint; "5m", "15m", and "generic" are all valid.
         // Unknown values default to generic behaviour in market discovery.
