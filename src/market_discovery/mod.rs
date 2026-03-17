@@ -1,5 +1,5 @@
 use crate::config::BotConfig;
-use crate::types::{Market, MarketType, Outcome};
+use crate::types::{Market, MarketType};
 use anyhow::{bail, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::Client;
@@ -39,7 +39,7 @@ pub fn calculate_next_slug(
     (slug, next_window)
 }
 
-/// Seconds until the current window closes.
+/// Seconds until the current window closes (based on fixed MarketType period).
 pub fn time_remaining(market_type: MarketType, now_ts: i64) -> i64 {
     let period = market_type.duration_secs();
     let window_end = now_ts - (now_ts % period) + period;
@@ -61,40 +61,77 @@ impl MarketDiscovery {
         Ok(Self { config, client })
     }
 
-    /// Find an active market for the given asset and market type.
-    /// Tries current window slug, falls back to Gamma API.
+    /// Find an active market using a three-tier strategy:
+    ///
+    /// 1. If `strategy.market_slug` is set in config → direct CLOB + Gamma lookup
+    /// 2. If `market_type` is "5m" or "15m" → try the computed window slug
+    /// 3. Keyword search via Gamma API using `strategy.keyword_search`
     pub async fn find_active_market(
         &self,
         asset: &str,
         market_type: MarketType,
     ) -> Result<Market> {
-        let now_ts = Utc::now().timestamp();
-        let slug = calculate_slug(asset, market_type, now_ts);
-        info!("Looking for market: {}", slug);
+        // ── Tier 1: operator-specified slug ─────────────────────────────────
+        if let Some(ref slug) = self.config.strategy.market_slug {
+            info!("Using configured market_slug: {}", slug);
+            match self.fetch_from_clob(slug).await {
+                Ok(m) => return Ok(m),
+                Err(e) => debug!("CLOB lookup for configured slug '{}' failed: {}", slug, e),
+            }
+            match self.fetch_from_gamma_by_exact_slug(slug).await {
+                Ok(m) => return Ok(m),
+                Err(e) => debug!("Gamma lookup for configured slug '{}' failed: {}", slug, e),
+            }
+            warn!("Configured market_slug '{}' not found on CLOB or Gamma", slug);
+        }
 
-        // Try CLOB API first
-        match self.fetch_from_clob(&slug).await {
-            Ok(m) => return Ok(m),
-            Err(e) => {
-                debug!("CLOB lookup failed for {}: {}", slug, e);
+        // ── Tier 2: computed window slug (5m / 15m legacy markets) ──────────
+        if market_type != MarketType::Generic {
+            let now_ts = Utc::now().timestamp();
+            let slug = calculate_slug(asset, market_type, now_ts);
+            debug!("Trying computed slug: {}", slug);
+
+            match self.fetch_from_clob(&slug).await {
+                Ok(m) => {
+                    info!("Found market via computed slug: {}", slug);
+                    return Ok(m);
+                }
+                Err(e) => debug!("CLOB lookup for '{}' failed: {}", slug, e),
+            }
+            match self.fetch_from_gamma_by_exact_slug(&slug).await {
+                Ok(m) => {
+                    info!("Found market via Gamma slug search: {}", slug);
+                    return Ok(m);
+                }
+                Err(e) => debug!("Gamma slug lookup for '{}' failed: {}", slug, e),
             }
         }
 
-        // Fallback to Gamma API
-        match self.fetch_from_gamma(&slug, market_type, asset).await {
-            Ok(m) => return Ok(m),
-            Err(e) => {
-                debug!("Gamma lookup failed for {}: {}", slug, e);
+        // ── Tier 3: keyword search ───────────────────────────────────────────
+        let keyword = &self.config.strategy.keyword_search;
+        info!(
+            "Slug-based discovery failed. Searching Gamma API with keyword: '{}'",
+            keyword
+        );
+        match self.fetch_from_gamma_by_keyword(keyword, market_type, asset).await {
+            Ok(m) => {
+                info!("Found market via keyword search '{}': {}", keyword, m.slug);
+                return Ok(m);
             }
+            Err(e) => debug!("Keyword search for '{}' failed: {}", keyword, e),
         }
 
-        bail!("No active market found for slug: {}", slug)
+        bail!(
+            "No active market found. Tried slug hint '{}', keyword '{}'. \
+             Set [strategy] market_slug = \"<exact-slug>\" in config.toml to pin a specific market.",
+            asset,
+            keyword
+        )
     }
 
-    async fn fetch_from_clob(
-        &self,
-        slug: &str,
-    ) -> Result<Market> {
+    // ── CLOB lookup by exact slug ────────────────────────────────────────────
+
+    async fn fetch_from_clob(&self, slug: &str) -> Result<Market> {
         let url = format!("{}/markets/{}", self.config.polymarket.clob_api_url, slug);
         let resp = self
             .client
@@ -108,14 +145,11 @@ impl MarketDiscovery {
         parse_clob_market(&resp, slug)
     }
 
-    async fn fetch_from_gamma(
-        &self,
-        slug: &str,
-        market_type: MarketType,
-        asset: &str,
-    ) -> Result<Market> {
+    // ── Gamma lookup by exact slug ───────────────────────────────────────────
+
+    async fn fetch_from_gamma_by_exact_slug(&self, slug: &str) -> Result<Market> {
         let url = format!(
-            "{}/markets?slug={}&active=true",
+            "{}/markets?slug={}&active=true&limit=1",
             self.config.polymarket.gamma_api_url, slug
         );
         let resp = self
@@ -131,7 +165,85 @@ impl MarketDiscovery {
         if markets.is_empty() {
             bail!("No markets from Gamma for slug: {}", slug);
         }
-        parse_gamma_market(&markets[0], slug, market_type, asset)
+
+        // Verify the slug matches exactly (Gamma may do partial matching)
+        let found_slug = markets[0]["slug"].as_str().unwrap_or("");
+        if found_slug != slug {
+            bail!(
+                "Gamma returned slug '{}', expected '{}'",
+                found_slug,
+                slug
+            );
+        }
+
+        // Derive MarketType from the actual slug
+        let mt = market_type_from_slug(found_slug);
+        let asset = extract_asset_from_slug(found_slug);
+        parse_gamma_market(&markets[0], found_slug, mt, &asset)
+    }
+
+    // ── Gamma keyword search (Tier 3 fallback) ───────────────────────────────
+
+    /// Search Gamma API for active binary markets whose question contains `keyword`.
+    /// Returns the market with the most time remaining so the bot has a full window.
+    async fn fetch_from_gamma_by_keyword(
+        &self,
+        keyword: &str,
+        _market_type: MarketType,
+        asset: &str,
+    ) -> Result<Market> {
+        // Gamma supports ?q= for full-text search
+        let base_url = format!("{}/markets", self.config.polymarket.gamma_api_url);
+        let resp = self
+            .client
+            .get(&base_url)
+            .query(&[("active", "true"), ("q", keyword), ("limit", "20")])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+
+        let markets = resp.as_array().ok_or_else(|| anyhow::anyhow!("Not an array"))?;
+        if markets.is_empty() {
+            bail!("No active markets found for keyword '{}'", keyword);
+        }
+
+        // Pick the market with the most time remaining (best window for quoting)
+        let best = markets
+            .iter()
+            .filter_map(|m| {
+                let slug = m["slug"].as_str()?;
+                let end_date = m["endDate"]
+                    .as_str()
+                    .or_else(|| m["end_date_iso"].as_str())?;
+                let end_time = parse_datetime(end_date).ok()?;
+                let secs_left = (end_time - Utc::now()).num_seconds();
+                if secs_left > 30 { Some((secs_left, m, slug.to_string())) } else { None }
+            })
+            .max_by_key(|(secs, _, _)| *secs);
+
+        match best {
+            Some((secs, market_json, slug)) => {
+                info!(
+                    "Keyword '{}' matched market '{}' ({}s remaining)",
+                    keyword, slug, secs
+                );
+                let mt = market_type_from_slug(&slug);
+                let discovered_asset = extract_asset_from_slug(&slug);
+                // Use provided asset hint if slug extraction gives a generic result
+                let effective_asset = if discovered_asset.len() > 1 {
+                    discovered_asset
+                } else {
+                    asset.to_uppercase()
+                };
+                parse_gamma_market(market_json, &slug, mt, &effective_asset)
+            }
+            None => bail!(
+                "All markets matching '{}' have < 30s remaining",
+                keyword
+            ),
+        }
     }
 
     /// Fetch fee rate for a token. Returns default 315 bps if unavailable.
@@ -155,6 +267,20 @@ impl MarketDiscovery {
     }
 }
 
+// ── Market type detection ─────────────────────────────────────────────────────
+
+fn market_type_from_slug(slug: &str) -> MarketType {
+    if slug.contains("-5m-") || slug.contains("-5m") {
+        MarketType::FiveMinute
+    } else if slug.contains("-15m-") || slug.contains("-15m") {
+        MarketType::FifteenMinute
+    } else {
+        MarketType::Generic
+    }
+}
+
+// ── Market parsers ────────────────────────────────────────────────────────────
+
 fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
     let condition_id = v["condition_id"]
         .as_str()
@@ -167,10 +293,9 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
 
     let (token_id_up, token_id_down) = extract_token_ids(tokens)?;
 
-    let end_date_iso = v["end_date_iso"]
-        .as_str()
-        .or_else(|| v["game_start_time"].as_str())
-        .unwrap_or("");
+    // Bug fix: use end_date_iso for end time; do NOT fall back to game_start_time
+    // (which is the *start* time — using it as end would give seconds_remaining ≤ 0).
+    let end_date_iso = v["end_date_iso"].as_str().unwrap_or("");
     let end_time = parse_datetime(end_date_iso)?;
 
     let start_time = v["game_start_time"]
@@ -178,12 +303,8 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         .and_then(|s| parse_datetime(s).ok())
         .unwrap_or_else(Utc::now);
 
-    let market_type = if slug.contains("-5m-") {
-        MarketType::FiveMinute
-    } else {
-        MarketType::FifteenMinute
-    };
-
+    // Bug fix: derive MarketType from slug, defaulting to Generic (not FifteenMinute)
+    let market_type = market_type_from_slug(slug);
     let asset = extract_asset_from_slug(slug);
 
     Ok(Market {
@@ -225,13 +346,19 @@ fn parse_gamma_market(
         .unwrap_or("");
     let end_time = parse_datetime(end_date)?;
 
+    let start_time = v["startDate"]
+        .as_str()
+        .or_else(|| v["start_date_iso"].as_str())
+        .and_then(|s| parse_datetime(s).ok())
+        .unwrap_or_else(Utc::now);
+
     Ok(Market {
         condition_id,
         slug: slug.to_string(),
         question: v["question"].as_str().unwrap_or("").to_string(),
         token_id_up,
         token_id_down,
-        start_time: Utc::now(),
+        start_time,
         end_time,
         market_type,
         asset: asset.to_string(),
@@ -307,6 +434,7 @@ fn extract_asset_from_slug(slug: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
 
     #[test]
     fn test_slug_calculation() {
@@ -343,5 +471,48 @@ mod tests {
         let (slug, next_ts) = calculate_next_slug("BTC", MarketType::FiveMinute, ts);
         assert_eq!(next_ts, 1710000300);
         assert_eq!(slug, "btc-updown-5m-1710000300");
+    }
+
+    #[test]
+    fn test_market_type_from_slug() {
+        assert_eq!(market_type_from_slug("btc-updown-5m-1710000000"), MarketType::FiveMinute);
+        assert_eq!(market_type_from_slug("btc-updown-15m-1710000900"), MarketType::FifteenMinute);
+        assert_eq!(market_type_from_slug("will-btc-hit-70k-by-march"), MarketType::Generic);
+        assert_eq!(market_type_from_slug("eth-updown-5m-1710000000"), MarketType::FiveMinute);
+    }
+
+    #[test]
+    fn test_parse_clob_end_date_iso_not_start_time() {
+        // Bug fix regression: end_date_iso must NOT fall back to game_start_time
+        let v = serde_json::json!({
+            "condition_id": "0xabc",
+            "tokens": [
+                {"token_id": "tok1", "outcome": "Yes"},
+                {"token_id": "tok2", "outcome": "No"}
+            ],
+            "end_date_iso": "2099-01-01T00:00:00Z",
+            "game_start_time": "2020-01-01T00:00:00Z",
+            "question": "Test"
+        });
+        let m = parse_clob_market(&v, "btc-updown-5m-1710000000").unwrap();
+        // end_time must be 2099, not 2020
+        assert!(m.end_time.year() == 2099, "end_time was incorrectly set to start time");
+        assert!(m.seconds_remaining() > 0, "market appears already settled");
+    }
+
+    #[test]
+    fn test_parse_clob_generic_market_type() {
+        // Bug fix regression: non-5m/15m slugs must get MarketType::Generic
+        let v = serde_json::json!({
+            "condition_id": "0xabc",
+            "tokens": [
+                {"token_id": "tok1", "outcome": "Yes"},
+                {"token_id": "tok2", "outcome": "No"}
+            ],
+            "end_date_iso": "2099-01-01T00:00:00Z",
+            "question": "Will BTC hit $100k?"
+        });
+        let m = parse_clob_market(&v, "will-btc-hit-100k").unwrap();
+        assert_eq!(m.market_type, MarketType::Generic);
     }
 }

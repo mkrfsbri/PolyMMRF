@@ -177,7 +177,8 @@ impl MarketMakingStrategy {
     async fn wait_for_market(&self) -> Market {
         let market_type = match self.config.strategy.market_type.as_str() {
             "15m" => MarketType::FifteenMinute,
-            _ => MarketType::FiveMinute,
+            "5m" => MarketType::FiveMinute,
+            _ => MarketType::Generic, // "generic" or any unrecognised value → keyword search
         };
         let asset = self
             .config
@@ -205,7 +206,7 @@ impl MarketMakingStrategy {
                     }
                 }
                 Err(e) => {
-                    debug!("Market discovery failed: {}", e);
+                    warn!("Market discovery failed: {}", e);
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -224,8 +225,9 @@ impl MarketMakingStrategy {
         let max_half =
             Decimal::try_from(self.config.strategy.max_spread / 2.0).unwrap_or(dec!(0.05));
 
-        // Time-decay adaptive spread
-        let total_duration = market.market_type.duration_secs();
+        // Time-decay adaptive spread — use actual start→end duration so
+        // Generic markets (non-5m/15m) get correct spread decay (Bug #5 fix).
+        let total_duration = market.actual_duration_secs();
         let remaining = market.seconds_remaining();
         let time_factor = if total_duration > 0 {
             Decimal::new(remaining, 0) / Decimal::new(total_duration, 0)

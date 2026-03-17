@@ -28,6 +28,19 @@ rest_url    = "https://api.binance.com"
 # Trading symbol
 symbol      = "BTCUSDT"
 
+[coinbase]
+# Coinbase Advanced Trade spot price REST endpoint (no API key required)
+rest_url            = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+# How often to poll Coinbase while Binance WS is unavailable (milliseconds)
+poll_interval_ms    = 5000
+# Switch to Coinbase after this many consecutive Binance WS failures
+# Increase this on stable connections; lower it in geo-blocked regions
+max_binance_failures = 3
+# While in Coinbase fallback, retry Binance WS every N seconds
+retry_binance_secs  = 60
+# Set to false to disable the Coinbase fallback entirely (not recommended)
+enabled             = true
+
 [strategy]
 # Target bid price in USDC (0.45 = 45 cents)
 # For 50/50 markets this captures maximum maker rebate
@@ -46,12 +59,24 @@ quote_refresh_ms     = 5000
 inventory_skew_threshold = 0.10
 # Max skew adjustment per side (price units)
 inventory_skew_amount    = 0.02
-# Market window: "5m" (300s) or "15m" (900s)
-market_type          = "5m"
+# Market discovery hint: "5m", "15m", or "generic"
+# "5m" / "15m" try the old btc-updown window-slug first then fall back.
+# "generic" skips slug generation and goes straight to keyword_search.
+market_type          = "generic"
 # Assets to trade
 assets               = ["BTC"]
 # Post-only orders (maker rebate farming — keep true in production)
 post_only            = true
+
+# ── Market targeting ──────────────────────────────────────────────────────────
+# Option A: pin a specific market by its exact Polymarket slug (highest priority)
+# Uncomment and set to the slug shown in the Polymarket URL, e.g.:
+#   https://polymarket.com/event/will-btc-be-above-90k-on-jan-1
+# market_slug = "will-btc-be-above-90k-on-jan-1"
+
+# Option B (default): keyword search — Gamma API searches active market titles
+# for this string (case-insensitive). The market with the most time remaining wins.
+keyword_search       = "BTC"
 
 [risk]
 # Total trading bankroll in USDC

@@ -81,13 +81,19 @@ async fn main() -> Result<()> {
     let discovery = Arc::new(MarketDiscovery::new(config.clone())?);
     let execution = Arc::new(ExecutionEngine::new(config.clone(), state.clone())?);
 
-    // ── Binance Feed Task ─────────────────────────────────────────────────────
+    // ── BTC Price Feed (Binance WS + Coinbase REST fallback) ──────────────────
     {
         let ws_url = config.binance.ws_url.clone();
+        let coinbase_cfg = config.coinbase.clone();
         let state_c = state.clone();
         let tx_c = event_tx.clone();
+        info!(
+            "Price feed: Binance WS primary | Coinbase REST fallback after {} failures ({})",
+            coinbase_cfg.max_binance_failures,
+            if coinbase_cfg.enabled { "enabled" } else { "disabled" },
+        );
         tokio::spawn(async move {
-            data::run_binance_feed(ws_url, state_c, tx_c).await;
+            data::run_btc_price_feed(ws_url, coinbase_cfg, state_c, tx_c).await;
         });
     }
 

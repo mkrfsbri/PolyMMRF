@@ -50,6 +50,32 @@ impl Default for BinanceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoinbaseConfig {
+    /// Coinbase Advanced Trade spot price endpoint (no auth required)
+    pub rest_url: String,
+    /// How often to poll when in fallback mode (milliseconds)
+    pub poll_interval_ms: u64,
+    /// Switch to Coinbase after this many consecutive Binance WS failures
+    pub max_binance_failures: u32,
+    /// While in Coinbase fallback, retry Binance WS every N seconds
+    pub retry_binance_secs: u64,
+    /// Set to false to disable the Coinbase fallback entirely
+    pub enabled: bool,
+}
+
+impl Default for CoinbaseConfig {
+    fn default() -> Self {
+        Self {
+            rest_url: "https://api.coinbase.com/v2/prices/BTC-USD/spot".into(),
+            poll_interval_ms: 5000,
+            max_binance_failures: 3,
+            retry_binance_secs: 60,
+            enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategyConfig {
     /// Target bid price (e.g. 0.45 means we bid at 45 cents)
     pub target_bid_price: f64,
@@ -65,11 +91,25 @@ pub struct StrategyConfig {
     pub inventory_skew_threshold: f64,
     /// Max skew adjustment amount
     pub inventory_skew_amount: f64,
-    /// "5m" or "15m"
+    /// Hint for slug generation: "5m", "15m", or "generic".
+    /// Only used when `market_slug` is not set.
     pub market_type: String,
     /// Assets to trade (e.g. ["BTC"])
     pub assets: Vec<String>,
     pub post_only: bool,
+    /// If set, skip slug calculation and look up this exact market slug directly.
+    /// Example: "will-btc-hit-70k-in-march-2026"
+    #[serde(default)]
+    pub market_slug: Option<String>,
+    /// Gamma API keyword used when slug-based discovery fails.
+    /// Matches against market question/title (case-insensitive contains).
+    /// Default: "BTC"
+    #[serde(default = "default_keyword_search")]
+    pub keyword_search: String,
+}
+
+fn default_keyword_search() -> String {
+    "BTC".into()
 }
 
 impl Default for StrategyConfig {
@@ -86,6 +126,8 @@ impl Default for StrategyConfig {
             market_type: "5m".into(),
             assets: vec!["BTC".into()],
             post_only: true,
+            market_slug: None,
+            keyword_search: "BTC".into(),
         }
     }
 }
@@ -149,6 +191,8 @@ pub struct BotConfig {
     #[serde(default)]
     pub binance: BinanceConfig,
     #[serde(default)]
+    pub coinbase: CoinbaseConfig,
+    #[serde(default)]
     pub strategy: StrategyConfig,
     #[serde(default)]
     pub risk: RiskConfig,
@@ -196,9 +240,8 @@ impl BotConfig {
         if self.risk.pre_settlement_cancel_secs < 5 {
             bail!("pre_settlement_cancel_secs must be >= 5s");
         }
-        if s.market_type != "5m" && s.market_type != "15m" {
-            bail!("market_type must be '5m' or '15m'");
-        }
+        // market_type is a hint; "5m", "15m", and "generic" are all valid.
+        // Unknown values default to generic behaviour in market discovery.
         Ok(())
     }
 }
