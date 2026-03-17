@@ -196,12 +196,13 @@ impl MarketMakingStrategy {
             {
                 Ok(m) => {
                     let remaining = m.seconds_remaining();
-                    if remaining > 30 {
+                    let min_secs = self.config.strategy.min_market_secs_remaining;
+                    if remaining > min_secs {
                         return m;
                     } else {
                         info!(
-                            "Market {} has only {}s left, waiting for next window...",
-                            m.slug, remaining
+                            "Market {} has only {}s left (need >{}s), waiting...",
+                            m.slug, remaining, min_secs
                         );
                     }
                 }
