@@ -287,9 +287,18 @@ impl MarketDiscovery {
     async fn gamma_candidates(
         &self,
         keyword: &str,
-        _market_type: MarketType,
+        market_type: MarketType,
     ) -> Result<Vec<(i64, serde_json::Value, String)>> {
         let min_secs = self.config.strategy.min_market_secs_remaining;
+
+        // For short-term market types, cap max duration to avoid picking up
+        // long-running novelty/speculative markets (e.g. "will-bitcoin-hit-1m-before-gta-vi"
+        // has months remaining and would be wrong for a 5m/15m worker).
+        let max_secs: i64 = match market_type {
+            MarketType::FiveMinute => 3_600,    // 1 hour — covers a few 5-min windows
+            MarketType::FifteenMinute => 7_200, // 2 hours — covers several 15-min windows
+            MarketType::Generic => i64::MAX,    // no cap for generic workers
+        };
         let base_url = format!("{}/markets", self.config.polymarket.gamma_api_url);
 
         // closed=false: only unresolved markets; limit=50: wider net
@@ -393,16 +402,34 @@ impl MarketDiscovery {
                     skipped_expired += 1;
                     return None;
                 }
+                if secs_left > max_secs {
+                    debug!(
+                        "Skipping long-duration market '{}' ({}s > max {}s for {:?})",
+                        slug, secs_left, max_secs, market_type
+                    );
+                    skipped_expired += 1;
+                    return None;
+                }
 
                 Some((secs_left, m.clone(), slug))
             })
             .collect();
 
-        // Sort descending: market with most time remaining first
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        // For short-term market types (5m/15m), sort ascending (soonest expiry first)
+        // so we prefer the most-active short-term market over stale ones.
+        // For generic markets, sort descending (most time remaining) to avoid
+        // immediately-expiring markets.
+        match market_type {
+            MarketType::FiveMinute | MarketType::FifteenMinute => {
+                candidates.sort_by(|a, b| a.0.cmp(&b.0)); // ascending
+            }
+            MarketType::Generic => {
+                candidates.sort_by(|a, b| b.0.cmp(&a.0)); // descending
+            }
+        }
 
         debug!(
-            "Gamma '{}': {} total, {} closed, {} irrelevant, {} bad-date, {} <{}s → {} candidates",
+            "Gamma '{}': {} total, {} closed, {} irrelevant, {} bad-date, {} <{}s or >{max_s}s → {} candidates",
             keyword,
             markets.len(),
             skipped_closed,
@@ -411,6 +438,7 @@ impl MarketDiscovery {
             skipped_expired,
             min_secs,
             candidates.len(),
+            max_s = if max_secs == i64::MAX { "∞".to_string() } else { max_secs.to_string() },
         );
 
         Ok(candidates)

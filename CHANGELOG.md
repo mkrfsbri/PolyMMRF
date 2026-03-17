@@ -11,6 +11,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.4] - 2026-03-17
+
+### Fixed
+
+- **Long-duration novelty markets accepted for 5m/15m workers**
+  (`src/market_discovery/mod.rs`)
+
+  When Tier 2 slug lookup fails (btc-updown markets inactive), Tier 3 keyword
+  search was returning markets like `will-bitcoin-hit-1m-before-gta-vi-872` — a
+  months-long speculative market whose slug happens to contain "bitcoin". The
+  `_market_type` parameter in `gamma_candidates()` was never used, so there was
+  no duration cap for short-term workers.
+
+  **Fix:** `gamma_candidates()` now enforces per-type maximum duration:
+  - `5m` workers: max 3 600 s (1 hour)
+  - `15m` workers: max 7 200 s (2 hours)
+  - `generic` workers: unlimited (no change)
+
+  Additionally, 5m/15m candidates are sorted **ascending** by time-remaining
+  so the most-active short-window market is tried first, rather than the
+  longest-lived one.
+
+- **"Invalid symbol 46, offset 6" — `POLY_API_SECRET` base64 decode failure**
+  (`src/execution/signing.rs`)
+
+  `build_hmac_signature()` used only `STANDARD` base64 to decode the API
+  secret. Polymarket can issue secrets in URL-safe base64 (uses `-`/`_`)
+  or other variants; ASCII 46 (`.`) is not valid in any base64 alphabet, but
+  some client tooling emits secrets that mix in non-standard characters.
+
+  **Fix:** Decoding now tries three variants in order — `STANDARD` →
+  `URL_SAFE_NO_PAD` → `URL_SAFE` — and falls back to raw bytes with a
+  debug-level warning if all three fail, instead of hard-crashing.
+
+---
+
 ## [0.4.3] - 2026-03-17
 
 ### Fixed
