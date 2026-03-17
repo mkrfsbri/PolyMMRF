@@ -22,7 +22,7 @@ use types::{BotState, DataEvent};
 
 const BANNER: &str = r#"
 ╔═══════════════════════════════════════════════════════╗
-║       Polymarket Market Making Bot  v0.4.0            ║
+║       Polymarket Market Making Bot  v0.4.1            ║
 ║       Strategy: Maker Rebate Farming (BTC Up/Down)    ║
 ╚═══════════════════════════════════════════════════════╝
 "#;

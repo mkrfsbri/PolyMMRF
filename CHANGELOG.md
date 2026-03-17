@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.1] - 2026-03-17
+
+### Fixed
+
+- **Tier 3 keyword search never found any market — CLOB lookup used slug instead
+  of `condition_id`** (`src/market_discovery/mod.rs`)
+
+  The CLOB API path `GET /markets/{id}` accepts **`condition_id`** as the
+  identifier for all market types. Slug-based routing (`/markets/{slug}`) only
+  works for special Polymarket market types such as `btc-updown-*`.
+
+  Generic BTC prediction markets returned by Gamma keyword search have human-readable
+  slugs (e.g. `will-btc-close-above-90k-on-march-20`) but must be verified in CLOB
+  via their `condition_id`. The previous code discarded the Gamma `condition_id`
+  (`_market_json` was ignored) and only tried the slug path, which always returned
+  HTTP 404 — causing the "43 candidates found but none active in CLOB" failure.
+
+  **Fix:**
+  1. Added `fetch_from_clob_by_condition_id(condition_id, slug)` — calls
+     `GET /markets/{condition_id}`.
+  2. Tier 3 now extracts `conditionId` / `condition_id` from the Gamma response
+     and tries `condition_id` lookup **first**; falls back to slug lookup.
+  3. CLOB rejection is now logged at `INFO` level (showing slug + error) rather
+     than `DEBUG`, so failures are visible in default log output without
+     `RUST_LOG=debug`.
+
+---
+
 ## [0.4.0] - 2026-03-17
 
 ### Added
@@ -401,7 +429,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...v0.3.2
