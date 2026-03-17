@@ -22,8 +22,8 @@ use types::{BotState, DataEvent};
 
 const BANNER: &str = r#"
 ╔═══════════════════════════════════════════════════════╗
-║       Polymarket Market Making Bot  v0.1.0            ║
-║       Strategy: Maker Rebate Farming (BTC 5m/15m)     ║
+║       Polymarket Market Making Bot  v0.4.0            ║
+║       Strategy: Maker Rebate Farming (BTC Up/Down)    ║
 ╚═══════════════════════════════════════════════════════╝
 "#;
 
@@ -61,8 +61,8 @@ async fn main() -> Result<()> {
         }
     );
     info!(
-        "Strategy: {} | Assets: {:?} | Spread: +/-{:.3}",
-        config.strategy.market_type,
+        "Market workers: {:?} | Assets: {:?} | Spread: +/-{:.3}",
+        config.strategy.market_types,
         config.strategy.assets,
         config.strategy.half_spread
     );
@@ -119,22 +119,58 @@ async fn main() -> Result<()> {
         });
     }
 
-    // ── Strategy ──────────────────────────────────────────────────────────────
-    let event_rx = event_tx.subscribe();
-    let mut strategy = MarketMakingStrategy::new(
-        config.clone(),
-        state.clone(),
-        execution.clone(),
-        risk.clone(),
-        discovery.clone(),
-    );
+    // ── Market-Making Workers (one per market type) ───────────────────────────
+    // Each worker independently discovers and trades its assigned market type.
+    // They share the same price feed, risk engine, and execution engine.
+    let market_types = config.strategy.market_types.clone();
+    info!("Spawning {} market worker(s): {:?}", market_types.len(), market_types);
 
-    if let Err(e) = strategy.run(event_rx).await {
-        error!("Strategy error: {}", e);
-        let n = execution.cancel_all_orders().await;
-        info!("Emergency cancelled {} orders", n);
-        return Err(e);
+    let mut handles = Vec::new();
+
+    for market_type_str in market_types {
+        let config_c = config.clone();
+        let state_c = state.clone();
+        let execution_c = execution.clone();
+        let risk_c = risk.clone();
+        let discovery_c = discovery.clone();
+        let event_rx = event_tx.subscribe();
+        let mt = market_type_str.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut strategy = MarketMakingStrategy::new(
+                mt.clone(),
+                config_c,
+                state_c,
+                execution_c,
+                risk_c,
+                discovery_c.clone(),
+            );
+            if let Err(e) = strategy.run(event_rx, discovery_c).await {
+                error!("[{}] Worker error: {}", mt, e);
+                Err(e)
+            } else {
+                Ok(())
+            }
+        });
+
+        handles.push(handle);
     }
 
+    // Wait for all workers — they loop indefinitely so only exit on error.
+    // Ctrl+C handler above will call process::exit(0) before this.
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("Worker exited with error: {}", e);
+            }
+            Err(e) => {
+                error!("Worker task panicked: {}", e);
+            }
+        }
+    }
+
+    let n = execution.cancel_all_orders().await;
+    info!("Emergency cancelled {} orders, all workers exited", n);
     Ok(())
 }

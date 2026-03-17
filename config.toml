@@ -59,24 +59,38 @@ quote_refresh_ms     = 5000
 inventory_skew_threshold = 0.10
 # Max skew adjustment per side (price units)
 inventory_skew_amount    = 0.02
-# Market discovery hint: "5m", "15m", or "generic"
-# "5m" / "15m" try the old btc-updown window-slug first then fall back.
-# "generic" skips slug generation and goes straight to keyword_search.
-market_type          = "generic"
+# Market types to trade concurrently — one independent worker is spawned per entry.
+# Each worker runs its own discovery → quote → settle cycle in parallel.
+#   "5m"      → worker targets btc-updown-5m-{ts} markets (5-minute BTC up/down)
+#   "15m"     → worker targets btc-updown-15m-{ts} markets (15-minute BTC up/down)
+#   "generic" → keyword search only (no slug computation)
+# Default: both 5m and 15m — bot places orders on two timeframes simultaneously.
+market_types         = ["5m", "15m"]
 # Assets to trade
 assets               = ["BTC"]
 # Post-only orders (maker rebate farming — keep true in production)
 post_only            = true
 
 # ── Market targeting ──────────────────────────────────────────────────────────
-# Option A: pin a specific market by its exact Polymarket slug (highest priority)
+# Discovery order:
+#   1. market_slug (if set)             — exact pinned market
+#   2. Computed window slug             — btc-updown-5m-{ts} / btc-updown-15m-{ts}
+#   3. keyword_search + keyword_fallbacks — Gamma full-text search, CLOB-verified
+#
+# Option A: pin a specific market by its exact Polymarket slug (highest priority).
 # Uncomment and set to the slug shown in the Polymarket URL, e.g.:
-#   https://polymarket.com/event/will-btc-be-above-90k-on-jan-1
-# market_slug = "will-btc-be-above-90k-on-jan-1"
+#   https://polymarket.com/event/btc-updown-5m-1773723900
+# market_slug = "btc-updown-5m-1773723900"
 
-# Option B (default): keyword search — Gamma API searches active market titles
-# for this string (case-insensitive). The market with the most time remaining wins.
-keyword_search       = "BTC"
+# Option B (Tier 3 fallback): keyword search — Gamma API full-text search.
+# Only reached when Tier 1 and Tier 2 both fail (i.e. btc-updown window slugs
+# are not live on CLOB). Targets structured BTC price-prediction markets and
+# filters out novelty/meme markets.
+keyword_search       = "Will Bitcoin"
+
+# Additional fallback keywords tried in order if keyword_search finds no active
+# CLOB market. Each triggers a separate Gamma API query.
+keyword_fallbacks    = ["Bitcoin price", "BTC price"]
 
 # Minimum seconds a market must have remaining before the bot enters it.
 # Must be greater than pre_settlement_cancel_secs (currently 10).
@@ -88,8 +102,8 @@ min_market_secs_remaining = 120
 bankroll             = 1000.0
 # Max fraction of bankroll exposed in any single market (0.10 = 10%)
 max_exposure_pct     = 0.10
-# Maximum concurrent markets (MVP: 1)
-max_concurrent_markets = 1
+# Maximum concurrent markets — set to match the number of entries in market_types
+max_concurrent_markets = 2
 # Pause trading if daily loss exceeds this fraction of bankroll (0.05 = 5%)
 daily_loss_limit_pct = 0.05
 # Refuse new orders if inventory ratio exceeds this threshold (0.75 = 75:25)

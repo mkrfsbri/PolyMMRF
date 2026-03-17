@@ -11,6 +11,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-03-17
+
+### Added
+
+- **Concurrent dual-market trading — 5m and 15m simultaneously**
+  (`src/main.rs`, `src/strategy/market_making.rs`, `src/config/mod.rs`)
+
+  The bot now spawns one independent `MarketMakingStrategy` worker per entry in
+  `market_types`. By default this is `["5m", "15m"]`, meaning:
+
+  - A **5m worker** continuously discovers `btc-updown-5m-{ts}` markets and
+    places maker quotes on every 5-minute window.
+  - A **15m worker** concurrently discovers `btc-updown-15m-{ts}` markets and
+    places maker quotes on every 15-minute window.
+  - Both workers share the same BTC price feed, risk engine, and execution
+    engine — but maintain fully **isolated per-worker inventory**.
+
+- **Per-worker local inventory** (`src/strategy/market_making.rs`)
+
+  Each `MarketMakingStrategy` now tracks `local_inv_up` and `local_inv_down`
+  independently. This prevents cross-market inventory bleed: a 15m fill no
+  longer corrupts the 5m worker's inventory skew or settlement PnL.
+
+- **`market_types: Vec<String>` config field** (`src/config/mod.rs`, `config.toml`)
+
+  Replaces the single `market_type: String`. Each element spawns one worker.
+  Old configs with `market_type = "5m"` are transparently migrated.
+
+  ```toml
+  # Trade both timeframes concurrently (default)
+  market_types = ["5m", "15m"]
+  # Trade only 15m markets
+  # market_types = ["15m"]
+  ```
+
+### Changed
+
+- `config.toml`: `market_type = "5m"` → `market_types = ["5m", "15m"]`.
+- `config.toml`: `max_concurrent_markets` updated from `1` to `2`.
+- `src/types.rs`: `BotState.current_market: RwLock<Option<Market>>` replaced by
+  `current_markets: DashMap<String, Market>` keyed by market-type string.
+- `src/monitoring/mod.rs`: status log now shows all active markets, e.g.
+  `markets=[5m:btc-updown-5m-…, 15m:btc-updown-15m-…]`.
+- `src/strategy/market_making.rs`: `new()` takes `market_type_str: String` as
+  first argument; `run()` takes `discovery: Arc<MarketDiscovery>`.
+- `src/strategy/sim_fills.rs`: `simulate_settlement()` replaced by `record_pnl()`
+  — PnL is now computed by the strategy from per-worker local inventory.
+- Version banner updated to v0.4.0.
+
+---
+
+## [0.3.3] - 2026-03-17
+
+### Fixed
+
+- **`market_type = "generic"` in `config.toml` silently disabled BTC up/down slug discovery**
+  (`config.toml`)
+
+  The bot is designed to trade `btc-updown-5m` and `btc-updown-15m` window markets.
+  These are targeted via a **three-tier discovery** path:
+
+  | Tier | Description |
+  |------|-------------|
+  | 1 | Pinned `market_slug` in config (highest priority) |
+  | 2 | Computed window slug — `btc-updown-5m-{ts}` / `btc-updown-15m-{ts}` |
+  | 3 | Gamma keyword search, CLOB-verified (fallback only) |
+
+  Tier 2 is **only active** when `market_type` is `"5m"` or `"15m"`. The previous
+  default of `"generic"` skipped Tier 2 entirely, meaning the bot never attempted
+  the canonical `btc-updown-{5m|15m}-{window_timestamp}` slugs and went straight
+  to generic keyword search.
+
+  **Fix:** Changed default `market_type` from `"generic"` to `"5m"`. The bot now
+  tries `btc-updown-5m-{ts}` first on every cycle. Switch to `"15m"` for the
+  15-minute window variant. Tier 3 keyword search remains as a fallback for when
+  Polymarket's fixed-window markets are temporarily unavailable.
+
+### Changed
+
+- `config.toml`: `market_type` default changed from `"generic"` to `"5m"`.
+- `config.toml`: Expanded `[strategy]` comments to document the three-tier discovery
+  order and clarify when each tier is active.
+- `config.toml`: `market_slug` example updated to show a BTC up/down slug
+  (`btc-updown-5m-1773723900`) instead of a generic example.
+
+---
+
+## [0.3.2] - 2026-03-17
+
+### Fixed
+
+- **[Critical] Keyword search accepted Gamma markets not available in CLOB API**
+  (`src/market_discovery/mod.rs`)
+
+  The Gamma metadata API lists all markets — including novelty/meme markets
+  (e.g. `will-bitcoin-hit-1m-before-gta-vi`) that have no active order book in the
+  CLOB trading API. The previous code accepted the first Gamma hit as a tradeable
+  market without verifying it exists in CLOB. The bot would then fail silently
+  when trying to subscribe to orderbooks or place orders.
+
+  **Fix:** After Gamma keyword search, candidates are now iterated in
+  most-time-remaining order and each is verified against the CLOB API
+  (`GET /markets/{slug}`). The first slug that returns a valid CLOB response is
+  used. Slugs that 404 on CLOB are skipped with a `debug` log. If no candidate
+  passes CLOB verification, the next fallback keyword is tried.
+
+- **Keyword `"BTC"` too broad — matched novelty markets**
+  Default `keyword_search` changed from `"BTC"` to `"Will Bitcoin"`.
+  "Will Bitcoin" targets structured price-prediction markets (e.g.
+  "Will Bitcoin exceed $80,000 by end of April?") and avoids meme/GTA VI/
+  hypothetical markets that appear when searching bare "BTC".
+
+- **Version banner showed `v0.1.0`** despite being at v0.3.2. Fixed.
+
+### Added
+
+- **`[strategy] keyword_fallbacks`** — ordered list of fallback keyword searches tried
+  when the primary `keyword_search` finds no CLOB-active market.
+  Default: `["Bitcoin price", "BTC price"]`.
+  Each is an independent Gamma API query; the first keyword + CLOB combination
+  that succeeds wins.
+
+- **Config validation**: `min_market_secs_remaining` must be greater than
+  `pre_settlement_cancel_secs`. A config where the bot would enter a market only
+  to immediately trigger pre-settlement cancel now fails at startup with a clear
+  error.
+
+### Changed
+
+- `fetch_from_gamma_by_keyword` refactored into `gamma_candidates` (returns all
+  sorted candidates) + CLOB-verification loop in `find_active_market`.
+  This means CLOB is always the authoritative data source — even when Gamma is
+  used for discovery, the final market struct is populated from the CLOB response.
+
+- `config.toml`: `keyword_search` updated to `"Will Bitcoin"`;
+  `keyword_fallbacks` array added.
+
+---
+
 ## [0.3.1] - 2026-03-17
 
 ### Fixed
@@ -262,7 +401,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...v0.4.0
+[0.3.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.1.0...v0.2.0

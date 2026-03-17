@@ -1,6 +1,6 @@
 use crate::config::BotConfig;
 use crate::execution::ExecutionEngine;
-use crate::market_discovery::{time_remaining, MarketDiscovery};
+use crate::market_discovery::MarketDiscovery;
 use crate::risk::RiskEngine;
 use crate::strategy::sim_fills::SimFillEngine;
 use crate::types::{BotState, DataEvent, Market, MarketType, OrderRequest, Outcome, Side};
@@ -26,19 +26,25 @@ pub struct QuotePair {
 // ── Strategy ──────────────────────────────────────────────────────────────────
 
 pub struct MarketMakingStrategy {
+    /// "5m", "15m", or "generic" — determines which market type this worker targets.
+    market_type_str: String,
     config: BotConfig,
     state: Arc<BotState>,
     execution: Arc<ExecutionEngine>,
     risk: Arc<RiskEngine>,
-    discovery: Arc<MarketDiscovery>,
     sim_fills: Option<SimFillEngine>,
     up_order_ids: Vec<String>,
     down_order_ids: Vec<String>,
     last_quotes: Option<QuotePair>,
+    /// Per-worker inventory — isolated from other market workers.
+    /// Resets at the end of each market cycle.
+    local_inv_up: Decimal,
+    local_inv_down: Decimal,
 }
 
 impl MarketMakingStrategy {
     pub fn new(
+        market_type_str: String,
         config: BotConfig,
         state: Arc<BotState>,
         execution: Arc<ExecutionEngine>,
@@ -51,35 +57,45 @@ impl MarketMakingStrategy {
             None
         };
 
+        // discovery is held by the caller (MarketDiscovery is passed to wait_for_market
+        // indirectly — store it here)
+        let _ = discovery; // used via find_active_market calls in wait_for_market
+
         Self {
+            market_type_str,
             config,
             state,
             execution,
             risk,
-            discovery,
             sim_fills,
             up_order_ids: Vec::new(),
             down_order_ids: Vec::new(),
             last_quotes: None,
+            local_inv_up: Decimal::ZERO,
+            local_inv_down: Decimal::ZERO,
         }
     }
 
     pub async fn run(
         &mut self,
         mut event_rx: broadcast::Receiver<DataEvent>,
+        discovery: Arc<MarketDiscovery>,
     ) -> Result<()> {
         loop {
-            // 1. Find active market with >30s remaining
-            let market = self.wait_for_market().await;
+            // 1. Find active market with sufficient time remaining
+            let market = self.wait_for_market(&discovery).await;
 
             info!(
-                "Trading market: {} | ends in {}s",
+                "[{}] Trading market: {} | ends in {}s",
+                self.market_type_str,
                 market.slug,
                 market.seconds_remaining()
             );
 
-            // Store in state
-            *self.state.current_market.write() = Some(market.clone());
+            // Store in per-worker slot of current_markets
+            self.state
+                .current_markets
+                .insert(self.market_type_str.clone(), market.clone());
 
             // 2. Wait for market to stabilize
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -87,11 +103,11 @@ impl MarketMakingStrategy {
             // 3. Record opening BTC price
             let open_price = self.state.get_btc_price();
             self.state.set_window_open_price(open_price);
-            info!("Window open price: ${}", open_price);
+            info!("[{}] Window open price: ${}", self.market_type_str, open_price);
 
             // 4. Place initial quotes
             if let Err(e) = self.place_initial_quotes(&market).await {
-                warn!("Failed to place initial quotes: {}", e);
+                warn!("[{}] Failed to place initial quotes: {}", self.market_type_str, e);
             }
 
             // 5. Inner event loop
@@ -106,7 +122,10 @@ impl MarketMakingStrategy {
 
                         // Pre-settlement cancel
                         if self.risk.should_emergency_cancel(secs_left) {
-                            info!("Pre-settlement cancel: {}s remaining", secs_left);
+                            info!(
+                                "[{}] Pre-settlement cancel: {}s remaining",
+                                self.market_type_str, secs_left
+                            );
                             self.cancel_all_quotes().await;
                             market_done = true;
                             break;
@@ -114,20 +133,38 @@ impl MarketMakingStrategy {
 
                         // Refresh quotes
                         if let Err(e) = self.refresh_quotes(&market).await {
-                            warn!("Quote refresh error: {}", e);
+                            warn!("[{}] Quote refresh error: {}", self.market_type_str, e);
                         }
 
-                        // Run sim fills
+                        // Run sim fills and accumulate into local inventory
                         if let Some(ref mut sim) = self.sim_fills {
                             let fills = sim.check_fills();
+                            for fill in &fills {
+                                match fill.side {
+                                    Side::Buy => match fill.outcome {
+                                        Outcome::Up => self.local_inv_up += fill.size,
+                                        Outcome::Down => self.local_inv_down += fill.size,
+                                    },
+                                    Side::Sell => match fill.outcome {
+                                        Outcome::Up => self.local_inv_up -= fill.size,
+                                        Outcome::Down => self.local_inv_down -= fill.size,
+                                    },
+                                }
+                            }
                             if !fills.is_empty() {
-                                info!("[SIM] {} fills this cycle", fills.len());
+                                info!(
+                                    "[SIM][{}] {} fills | inv UP={:.1} DOWN={:.1}",
+                                    self.market_type_str,
+                                    fills.len(),
+                                    self.local_inv_up,
+                                    self.local_inv_down,
+                                );
                             }
                         }
 
                         // Log metrics
                         let metrics = self.risk.metrics();
-                        info!("Metrics: {}", metrics);
+                        info!("[{}] {}", self.market_type_str, metrics);
                     }
 
                     event = event_rx.recv() => {
@@ -136,20 +173,23 @@ impl MarketMakingStrategy {
                                 self.state.order_books.insert(token_id, book);
                             }
                             Ok(DataEvent::PriceUpdate(price)) => {
-                                debug!("BTC price update: {}", price.price);
+                                debug!("[{}] BTC price update: {}", self.market_type_str, price.price);
                             }
                             Ok(DataEvent::MarketResolved { condition_id, winning_outcome }) => {
                                 if condition_id == market.condition_id {
-                                    info!("Market resolved: {:?} wins", winning_outcome);
+                                    info!(
+                                        "[{}] Market resolved: {:?} wins",
+                                        self.market_type_str, winning_outcome
+                                    );
                                     self.handle_settlement(&market, winning_outcome).await;
                                     market_done = true;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Event channel lagged by {} messages", n);
+                                warn!("[{}] Event channel lagged by {} messages", self.market_type_str, n);
                             }
                             Err(_) => {
-                                warn!("Event channel closed");
+                                warn!("[{}] Event channel closed", self.market_type_str);
                                 market_done = true;
                             }
                         }
@@ -159,26 +199,31 @@ impl MarketMakingStrategy {
 
             // 6. Cleanup
             self.cancel_all_quotes().await;
-            self.state.reset_inventory();
+            // Reset per-worker local inventory (not shared state)
+            self.local_inv_up = Decimal::ZERO;
+            self.local_inv_down = Decimal::ZERO;
             self.up_order_ids.clear();
             self.down_order_ids.clear();
-            *self.state.current_market.write() = None;
+            self.state.current_markets.remove(&self.market_type_str);
             self.last_quotes = None;
 
             if let Some(ref sim) = self.sim_fills {
-                info!("[SIM] Summary: {}", sim.summary());
+                info!("[SIM][{}] Summary: {}", self.market_type_str, sim.summary());
             }
 
-            info!("Market cycle complete, waiting 2s...");
+            info!(
+                "[{}] Market cycle complete, waiting 2s...",
+                self.market_type_str
+            );
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 
-    async fn wait_for_market(&self) -> Market {
-        let market_type = match self.config.strategy.market_type.as_str() {
+    async fn wait_for_market(&self, discovery: &MarketDiscovery) -> Market {
+        let market_type = match self.market_type_str.as_str() {
             "15m" => MarketType::FifteenMinute,
             "5m" => MarketType::FiveMinute,
-            _ => MarketType::Generic, // "generic" or any unrecognised value → keyword search
+            _ => MarketType::Generic,
         };
         let asset = self
             .config
@@ -189,11 +234,7 @@ impl MarketMakingStrategy {
             .unwrap_or_else(|| "BTC".into());
 
         loop {
-            match self
-                .discovery
-                .find_active_market(&asset, market_type)
-                .await
-            {
+            match discovery.find_active_market(&asset, market_type).await {
                 Ok(m) => {
                     let remaining = m.seconds_remaining();
                     let min_secs = self.config.strategy.min_market_secs_remaining;
@@ -201,13 +242,13 @@ impl MarketMakingStrategy {
                         return m;
                     } else {
                         info!(
-                            "Market {} has only {}s left (need >{}s), waiting...",
-                            m.slug, remaining, min_secs
+                            "[{}] Market {} has only {}s left (need >{}s), waiting...",
+                            self.market_type_str, m.slug, remaining, min_secs
                         );
                     }
                 }
                 Err(e) => {
-                    warn!("Market discovery failed: {}", e);
+                    warn!("[{}] Market discovery failed: {}", self.market_type_str, e);
                 }
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -226,8 +267,7 @@ impl MarketMakingStrategy {
         let max_half =
             Decimal::try_from(self.config.strategy.max_spread / 2.0).unwrap_or(dec!(0.05));
 
-        // Time-decay adaptive spread — use actual start→end duration so
-        // Generic markets (non-5m/15m) get correct spread decay (Bug #5 fix).
+        // Time-decay adaptive spread
         let total_duration = market.actual_duration_secs();
         let remaining = market.seconds_remaining();
         let time_factor = if total_duration > 0 {
@@ -235,12 +275,11 @@ impl MarketMakingStrategy {
         } else {
             dec!(0.5)
         };
-        // Wider early (time_factor=1), tighter near close (time_factor=0)
         let adaptive = half_spread * (dec!(0.5) + time_factor * dec!(0.5));
         let clamped_half = adaptive.max(min_half).min(max_half);
 
-        // Inventory skew
-        let (up_skew, down_skew) = self.risk.inventory_skew_adjustment();
+        // Per-worker inventory skew (isolated from other market workers)
+        let (up_skew, down_skew) = self.local_inventory_skew();
 
         // UP quotes
         let up_bid = (base_price - clamped_half + up_skew)
@@ -281,6 +320,25 @@ impl MarketMakingStrategy {
         }
     }
 
+    /// Compute inventory skew from this worker's local inventory only.
+    /// Prevents cross-market interference when trading 5m and 15m simultaneously.
+    fn local_inventory_skew(&self) -> (Decimal, Decimal) {
+        let total = self.local_inv_up + self.local_inv_down;
+        if total.is_zero() {
+            return (dec!(0), dec!(0));
+        }
+        let ratio = self.local_inv_up / total;
+        let deviation = ratio - dec!(0.5);
+        let threshold =
+            Decimal::try_from(self.config.risk.max_inventory_ratio - 0.5).unwrap_or(dec!(0.25));
+        if deviation.abs() <= threshold / dec!(2) {
+            return (dec!(0), dec!(0));
+        }
+        // 2 cents skew per 10% deviation
+        let skew = deviation * dec!(0.02);
+        (skew, -skew)
+    }
+
     fn should_update_quotes(&self, new_quotes: &QuotePair) -> bool {
         let min_change = dec!(0.01);
         if let Some(ref last) = self.last_quotes {
@@ -296,14 +354,14 @@ impl MarketMakingStrategy {
     async fn place_initial_quotes(&mut self, market: &Market) -> Result<()> {
         let gate = self.risk.can_trade();
         if !gate.allowed {
-            warn!("Risk gate blocked: {}", gate.reason);
+            warn!("[{}] Risk gate blocked: {}", self.market_type_str, gate.reason);
             return Ok(());
         }
 
         let quotes = self.calculate_quotes(market);
         info!(
-            "Initial quotes: UP bid={} DOWN bid={} size={}",
-            quotes.up_bid, quotes.down_bid, quotes.size
+            "[{}] Initial quotes: UP bid={} DOWN bid={} size={}",
+            self.market_type_str, quotes.up_bid, quotes.down_bid, quotes.size
         );
 
         // Place UP BUY limit
@@ -343,7 +401,7 @@ impl MarketMakingStrategy {
     async fn refresh_quotes(&mut self, market: &Market) -> Result<()> {
         let new_quotes = self.calculate_quotes(market);
         if !self.should_update_quotes(&new_quotes) {
-            debug!("Quotes unchanged, skipping refresh");
+            debug!("[{}] Quotes unchanged, skipping refresh", self.market_type_str);
             return Ok(());
         }
 
@@ -363,23 +421,35 @@ impl MarketMakingStrategy {
 
     // ── Settlement ────────────────────────────────────────────────────────────
 
-    async fn handle_settlement(&mut self, market: &Market, winning_outcome: Outcome) {
-        info!("Handling settlement: {:?} wins", winning_outcome);
-
-        let inv_up = self.state.get_inventory(Outcome::Up);
-        let inv_down = self.state.get_inventory(Outcome::Down);
+    async fn handle_settlement(&mut self, _market: &Market, winning_outcome: Outcome) {
+        info!(
+            "[{}] Handling settlement: {:?} wins | inv UP={:.1} DOWN={:.1}",
+            self.market_type_str, winning_outcome, self.local_inv_up, self.local_inv_down
+        );
 
         if let Some(ref mut sim) = self.sim_fills {
-            sim.simulate_settlement(winning_outcome);
+            // In sim mode, calculate PnL from local (per-worker) inventory
+            let cost_basis = dec!(0.45);
+            let pnl = match winning_outcome {
+                Outcome::Up => {
+                    self.local_inv_up * (dec!(1) - cost_basis) - self.local_inv_down * cost_basis
+                }
+                Outcome::Down => {
+                    self.local_inv_down * (dec!(1) - cost_basis) - self.local_inv_up * cost_basis
+                }
+            };
+            sim.record_pnl(pnl);
+            self.risk.record_trade_result(pnl);
+            info!("[SIM][{}] Settlement PnL: ${:.4}", self.market_type_str, pnl);
         } else {
-            // Live settlement PnL estimation
+            // Live settlement PnL estimation from local inventory
             let cost = dec!(0.45);
             let pnl = match winning_outcome {
                 Outcome::Up => {
-                    inv_up * (dec!(1) - cost) - inv_down * cost
+                    self.local_inv_up * (dec!(1) - cost) - self.local_inv_down * cost
                 }
                 Outcome::Down => {
-                    inv_down * (dec!(1) - cost) - inv_up * cost
+                    self.local_inv_down * (dec!(1) - cost) - self.local_inv_up * cost
                 }
             };
             self.risk.record_trade_result(pnl);
@@ -398,17 +468,27 @@ impl MarketMakingStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BotConfig, RiskConfig};
+    use crate::config::BotConfig;
+    use crate::market_discovery::MarketDiscovery;
+    use crate::execution::ExecutionEngine;
     use chrono::{Duration as CDuration, Utc};
     use crate::types::MarketType;
 
-    fn make_strategy() -> MarketMakingStrategy {
+    fn make_strategy() -> (MarketMakingStrategy, Arc<MarketDiscovery>) {
         let config = BotConfig::default();
         let state = BotState::new();
         let risk = Arc::new(RiskEngine::new(config.risk.clone(), state.clone()));
         let discovery = Arc::new(MarketDiscovery::new(config.clone()).unwrap());
         let execution = Arc::new(ExecutionEngine::new(config.clone(), state.clone()).unwrap());
-        MarketMakingStrategy::new(config, state, execution, risk, discovery)
+        let strategy = MarketMakingStrategy::new(
+            "5m".into(),
+            config,
+            state,
+            execution,
+            risk,
+            discovery.clone(),
+        );
+        (strategy, discovery)
     }
 
     fn make_market() -> Market {
@@ -429,12 +509,10 @@ mod tests {
 
     #[test]
     fn test_calculate_quotes_balanced() {
-        let strategy = make_strategy();
+        let (strategy, _) = make_strategy();
         let market = make_market();
         let quotes = strategy.calculate_quotes(&market);
 
-        // With target=0.45, half_spread=0.03 (default)
-        // UP bid should be around 0.42..0.45 range
         assert!(quotes.up_bid > dec!(0.01));
         assert!(quotes.up_bid < dec!(0.99));
         assert!(quotes.up_ask > quotes.up_bid);
@@ -443,11 +521,10 @@ mod tests {
 
     #[test]
     fn test_tick_rounding() {
-        let strategy = make_strategy();
+        let (strategy, _) = make_strategy();
         let market = make_market();
         let quotes = strategy.calculate_quotes(&market);
 
-        // All prices should be multiples of 0.01
         let tick = dec!(0.01);
         assert_eq!(quotes.up_bid % tick, dec!(0));
         assert_eq!(quotes.down_bid % tick, dec!(0));
@@ -455,10 +532,24 @@ mod tests {
 
     #[test]
     fn test_should_update_quotes_initial() {
-        let strategy = make_strategy();
+        let (strategy, _) = make_strategy();
         let market = make_market();
         let quotes = strategy.calculate_quotes(&market);
-        // No previous quotes → should update
         assert!(strategy.should_update_quotes(&quotes));
+    }
+
+    #[test]
+    fn test_local_inventory_skew_balanced() {
+        let (strategy, _) = make_strategy();
+        // No inventory → no skew
+        let (up, down) = strategy.local_inventory_skew();
+        assert_eq!(up, dec!(0));
+        assert_eq!(down, dec!(0));
+    }
+
+    #[test]
+    fn test_market_type_str_field() {
+        let (strategy, _) = make_strategy();
+        assert_eq!(strategy.market_type_str, "5m");
     }
 }
