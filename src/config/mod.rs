@@ -91,14 +91,23 @@ pub struct StrategyConfig {
     pub inventory_skew_threshold: f64,
     /// Max skew adjustment amount
     pub inventory_skew_amount: f64,
-    /// Hint for slug generation: "5m", "15m", or "generic".
-    /// Only used when `market_slug` is not set.
-    pub market_type: String,
+    /// Market types to trade concurrently.
+    /// Each entry spawns an independent market-making worker.
+    ///   "5m"      → discovers btc-updown-5m-{ts} markets
+    ///   "15m"     → discovers btc-updown-15m-{ts} markets
+    ///   "generic" → keyword search only (no slug computation)
+    /// Default: ["5m", "15m"] — trade both BTC up/down timeframes simultaneously.
+    #[serde(default = "default_market_types")]
+    pub market_types: Vec<String>,
+    /// Deprecated: use `market_types` instead.
+    /// If set and `market_types` is empty, this single value is used.
+    #[serde(default, skip_serializing)]
+    pub market_type: Option<String>,
     /// Assets to trade (e.g. ["BTC"])
     pub assets: Vec<String>,
     pub post_only: bool,
     /// If set, skip slug calculation and look up this exact market slug directly.
-    /// Example: "will-btc-hit-70k-in-march-2026"
+    /// Example: "btc-updown-5m-1773723900"
     #[serde(default)]
     pub market_slug: Option<String>,
     /// Primary Gamma API keyword for market discovery.
@@ -115,6 +124,10 @@ pub struct StrategyConfig {
     /// Must be > pre_settlement_cancel_secs. Default: 120s.
     #[serde(default = "default_min_market_secs")]
     pub min_market_secs_remaining: i64,
+}
+
+fn default_market_types() -> Vec<String> {
+    vec!["5m".into(), "15m".into()]
 }
 
 fn default_keyword_search() -> String {
@@ -140,7 +153,8 @@ impl Default for StrategyConfig {
             quote_refresh_ms: 5000,
             inventory_skew_threshold: 0.1,
             inventory_skew_amount: 0.02,
-            market_type: "5m".into(),
+            market_types: default_market_types(),
+            market_type: None,
             assets: vec!["BTC".into()],
             post_only: true,
             market_slug: None,
@@ -173,7 +187,7 @@ impl Default for RiskConfig {
         Self {
             bankroll: 1000.0,
             max_exposure_pct: 0.10,
-            max_concurrent_markets: 1,
+            max_concurrent_markets: 2,
             daily_loss_limit_pct: 0.05,
             max_inventory_ratio: 0.75,
             circuit_breaker_losses: 5,
@@ -241,6 +255,13 @@ impl BotConfig {
             cfg.polymarket.funder_address = fa;
         }
 
+        // Migrate deprecated market_type → market_types
+        if cfg.strategy.market_types.is_empty() {
+            if let Some(ref mt) = cfg.strategy.market_type.clone() {
+                cfg.strategy.market_types = vec![mt.clone()];
+            }
+        }
+
         cfg.validate()?;
         Ok(cfg)
     }
@@ -266,8 +287,9 @@ impl BotConfig {
                 self.risk.pre_settlement_cancel_secs
             );
         }
-        // market_type is a hint; "5m", "15m", and "generic" are all valid.
-        // Unknown values default to generic behaviour in market discovery.
+        if s.market_types.is_empty() {
+            bail!("market_types must contain at least one entry (e.g. [\"5m\", \"15m\"])");
+        }
         Ok(())
     }
 }

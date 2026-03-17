@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use parking_lot::RwLock;
+// parking_lot::RwLock no longer needed (current_markets uses DashMap)
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     Arc,
 };
+
 
 // ── Enums ──────────────────────────────────────────────────────────────────────
 
@@ -232,8 +233,9 @@ pub struct BotState {
     pub active_orders: DashMap<String, ActiveOrder>,
     /// Live orderbooks tracked by token_id
     pub order_books: DashMap<String, OrderBook>,
-    /// Current active market
-    pub current_market: RwLock<Option<Market>>,
+    /// Current active markets keyed by market-type string ("5m", "15m", "generic").
+    /// Each market worker inserts/removes its entry independently.
+    pub current_markets: DashMap<String, Market>,
 }
 
 impl BotState {
@@ -248,7 +250,7 @@ impl BotState {
             paused: AtomicBool::new(false),
             active_orders: DashMap::new(),
             order_books: DashMap::new(),
-            current_market: RwLock::new(None),
+            current_markets: DashMap::new(),
         })
     }
 

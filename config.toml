@@ -59,12 +59,13 @@ quote_refresh_ms     = 5000
 inventory_skew_threshold = 0.10
 # Max skew adjustment per side (price units)
 inventory_skew_amount    = 0.02
-# Market discovery hint: "5m", "15m", or "generic"
-# "5m"  → Tier 2 tries btc-updown-5m-{ts} first, then falls back to keyword search.
-# "15m" → Tier 2 tries btc-updown-15m-{ts} first, then falls back to keyword search.
-# "generic" → skips slug computation and goes straight to keyword_search.
-# This bot targets BTC up/down window markets — use "5m" or "15m" as primary.
-market_type          = "5m"
+# Market types to trade concurrently — one independent worker is spawned per entry.
+# Each worker runs its own discovery → quote → settle cycle in parallel.
+#   "5m"      → worker targets btc-updown-5m-{ts} markets (5-minute BTC up/down)
+#   "15m"     → worker targets btc-updown-15m-{ts} markets (15-minute BTC up/down)
+#   "generic" → keyword search only (no slug computation)
+# Default: both 5m and 15m — bot places orders on two timeframes simultaneously.
+market_types         = ["5m", "15m"]
 # Assets to trade
 assets               = ["BTC"]
 # Post-only orders (maker rebate farming — keep true in production)
@@ -101,8 +102,8 @@ min_market_secs_remaining = 120
 bankroll             = 1000.0
 # Max fraction of bankroll exposed in any single market (0.10 = 10%)
 max_exposure_pct     = 0.10
-# Maximum concurrent markets (MVP: 1)
-max_concurrent_markets = 1
+# Maximum concurrent markets — set to match the number of entries in market_types
+max_concurrent_markets = 2
 # Pause trading if daily loss exceeds this fraction of bankroll (0.05 = 5%)
 daily_loss_limit_pct = 0.05
 # Refuse new orders if inventory ratio exceeds this threshold (0.75 = 75:25)

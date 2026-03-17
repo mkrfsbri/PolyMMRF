@@ -23,24 +23,25 @@ pub async fn monitoring_loop(state: Arc<BotState>, risk: Arc<RiskEngine>) {
             ((btc_price - open_price) / open_price) * rust_decimal_macros::dec!(100)
         };
 
-        let market_slug = state
-            .current_market
-            .read()
-            .as_ref()
-            .map(|m| m.slug.clone())
-            .unwrap_or_else(|| "none".to_string());
+        // Collect slugs from all active market workers ("5m", "15m", etc.)
+        let mut market_slugs: Vec<String> = state
+            .current_markets
+            .iter()
+            .map(|e| format!("{}:{}", e.key(), e.value().slug))
+            .collect();
+        market_slugs.sort();
+        let market_str = if market_slugs.is_empty() {
+            "none".to_string()
+        } else {
+            market_slugs.join(", ")
+        };
 
         info!(
-            "[STATUS] market={} btc=${:.0} delta={:.2}% pnl=${:.2} \
-             inv_up={:.1} inv_down={:.1} ratio={:.2} orders={} \
-             losses={} paused={}",
-            market_slug,
+            "[STATUS] markets=[{}] btc=${:.0} delta={:.2}% pnl=${:.2} orders={} losses={} paused={}",
+            market_str,
             btc_price,
             delta_pct,
             metrics.daily_pnl,
-            metrics.inventory_up,
-            metrics.inventory_down,
-            metrics.inventory_ratio,
             metrics.active_orders,
             metrics.consecutive_losses,
             metrics.is_paused

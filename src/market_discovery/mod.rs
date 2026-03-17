@@ -125,7 +125,7 @@ impl MarketDiscovery {
                     let total = candidates.len();
                     // Try each candidate in order of most-time-remaining; the first
                     // one that is also live in the CLOB API is the market we use.
-                    for (secs, market_json, slug) in candidates {
+                    for (secs, _market_json, slug) in candidates {
                         match self.fetch_from_clob(&slug).await {
                             Ok(clob_market) => {
                                 info!(

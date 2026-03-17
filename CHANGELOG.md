@@ -11,6 +11,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] - 2026-03-17
+
+### Added
+
+- **Concurrent dual-market trading — 5m and 15m simultaneously**
+  (`src/main.rs`, `src/strategy/market_making.rs`, `src/config/mod.rs`)
+
+  The bot now spawns one independent `MarketMakingStrategy` worker per entry in
+  `market_types`. By default this is `["5m", "15m"]`, meaning:
+
+  - A **5m worker** continuously discovers `btc-updown-5m-{ts}` markets and
+    places maker quotes on every 5-minute window.
+  - A **15m worker** concurrently discovers `btc-updown-15m-{ts}` markets and
+    places maker quotes on every 15-minute window.
+  - Both workers share the same BTC price feed, risk engine, and execution
+    engine — but maintain fully **isolated per-worker inventory**.
+
+- **Per-worker local inventory** (`src/strategy/market_making.rs`)
+
+  Each `MarketMakingStrategy` now tracks `local_inv_up` and `local_inv_down`
+  independently. This prevents cross-market inventory bleed: a 15m fill no
+  longer corrupts the 5m worker's inventory skew or settlement PnL.
+
+- **`market_types: Vec<String>` config field** (`src/config/mod.rs`, `config.toml`)
+
+  Replaces the single `market_type: String`. Each element spawns one worker.
+  Old configs with `market_type = "5m"` are transparently migrated.
+
+  ```toml
+  # Trade both timeframes concurrently (default)
+  market_types = ["5m", "15m"]
+  # Trade only 15m markets
+  # market_types = ["15m"]
+  ```
+
+### Changed
+
+- `config.toml`: `market_type = "5m"` → `market_types = ["5m", "15m"]`.
+- `config.toml`: `max_concurrent_markets` updated from `1` to `2`.
+- `src/types.rs`: `BotState.current_market: RwLock<Option<Market>>` replaced by
+  `current_markets: DashMap<String, Market>` keyed by market-type string.
+- `src/monitoring/mod.rs`: status log now shows all active markets, e.g.
+  `markets=[5m:btc-updown-5m-…, 15m:btc-updown-15m-…]`.
+- `src/strategy/market_making.rs`: `new()` takes `market_type_str: String` as
+  first argument; `run()` takes `discovery: Arc<MarketDiscovery>`.
+- `src/strategy/sim_fills.rs`: `simulate_settlement()` replaced by `record_pnl()`
+  — PnL is now computed by the strategy from per-worker local inventory.
+- Version banner updated to v0.4.0.
+
+---
+
 ## [0.3.3] - 2026-03-17
 
 ### Fixed
@@ -350,7 +401,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **21 unit tests** covering signing math, risk sizing, market discovery slug
   logic, and strategy quote calculation.
 
-[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/mkrfsbri/PolyMMRF/compare/v0.3.0...v0.3.1

@@ -118,32 +118,10 @@ impl SimFillEngine {
         fills
     }
 
-    /// Simulate settlement: compute PnL from current inventory.
-    /// winning_outcome inventory is worth 1.0, losing inventory is worth 0.0.
-    pub fn simulate_settlement(&mut self, winning_outcome: Outcome) {
-        let inv_up = self.state.get_inventory(Outcome::Up);
-        let inv_down = self.state.get_inventory(Outcome::Down);
-
-        // Estimate average cost at target_bid_price = 0.45
-        let cost_basis = dec!(0.45);
-
-        let pnl = match winning_outcome {
-            Outcome::Up => {
-                // UP tokens worth 1.0, DOWN tokens worth 0.0
-                let profit = inv_up * (dec!(1) - cost_basis);
-                let loss = inv_down * cost_basis;
-                profit - loss
-            }
-            Outcome::Down => {
-                let profit = inv_down * (dec!(1) - cost_basis);
-                let loss = inv_up * cost_basis;
-                profit - loss
-            }
-        };
-
+    /// Record a PnL amount computed externally (e.g. by the strategy from local inventory).
+    /// Updates the running total used in `summary()`.
+    pub fn record_pnl(&mut self, pnl: Decimal) {
         self.total_pnl += pnl;
-        self.state.add_daily_pnl(pnl);
-        info!("[SIM] Settlement PnL: ${:.4}", pnl);
     }
 
     pub fn summary(&self) -> String {
