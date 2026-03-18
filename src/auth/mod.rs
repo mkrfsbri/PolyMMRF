@@ -118,7 +118,13 @@ async fn build_l1_headers(
         .map_err(|e| anyhow::anyhow!("L1 auth signing failed: {}", e))?;
 
     let sig_bytes = sig.as_bytes();
-    let sig_hex = format!("0x{}", hex::encode(sig_bytes));
+
+    // alloy returns recovery id v = 0 or 1; ecrecover expects v = 27 or 28.
+    let mut adjusted = sig_bytes;
+    if adjusted[64] < 27 {
+        adjusted[64] += 27;
+    }
+    let sig_hex = format!("0x{}", hex::encode(adjusted));
 
     Ok(vec![
         ("POLY_ADDRESS".into(), funder_address.to_string()),

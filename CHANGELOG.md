@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.9] - 2026-03-18
+
+### Fixed
+
+- **EIP-712 v-byte mismatch causing persistent 401 Unauthorized on `POST /order`**
+
+  alloy's `PrivateKeySigner::sign_typed_data` returns the recovery id as `v = 0`
+  or `v = 1` in byte index 64 of the 65-byte signature.  Polymarket's CTF
+  Exchange contract uses `ecrecover`, which follows the legacy Ethereum
+  convention of `v = 27` or `v = 28` (as produced by web3.py / ethers.js).
+  Without the adjustment, on-chain signature recovery always fails and the CLOB
+  returns `401 Unauthorized`.
+
+  Fix applied in two places:
+  - `src/execution/signing.rs` — `sign_clob_order()`: adjust byte 64 before
+    hex-encoding the order signature.
+  - `src/auth/mod.rs` — `build_l1_headers()`: same adjustment for the L1
+    auth signature used by `GET /auth/derive-api-key` and `POST /auth/api-key`.
+
+  ```rust
+  let mut adjusted = sig.as_bytes();
+  if adjusted[64] < 27 { adjusted[64] += 27; }
+  let sig_hex = format!("0x{}", hex::encode(adjusted));
+  ```
+
+---
+
 ## [0.4.8] - 2026-03-18
 
 ### Added

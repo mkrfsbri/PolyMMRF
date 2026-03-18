@@ -136,7 +136,18 @@ pub async fn sign_clob_order(
         .map_err(|e| anyhow::anyhow!("EIP-712 signing failed: {}", e))?;
 
     let sig_bytes = sig.as_bytes();
-    let sig_hex = format!("0x{}", hex::encode(sig_bytes));
+
+    // alloy returns recovery id v = 0 or 1 in the last byte of `as_bytes()`.
+    // Polymarket's CTF Exchange contract calls ecrecover which expects
+    // v = 27 or 28 (the legacy Ethereum convention used by web3.py / ethers.js).
+    // Without this adjustment the on-chain signature verification always fails,
+    // causing the CLOB to return 401 Unauthorized.
+    let mut adjusted = sig_bytes;
+    if adjusted[64] < 27 {
+        adjusted[64] += 27;
+    }
+
+    let sig_hex = format!("0x{}", hex::encode(adjusted));
     let signer_hex = format!("{:?}", signer_addr);
 
     Ok((sig_hex, signer_hex, salt.to_string()))
