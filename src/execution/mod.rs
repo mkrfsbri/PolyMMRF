@@ -1,7 +1,9 @@
 pub mod signing;
 
 use crate::config::BotConfig;
-use crate::execution::signing::{build_l2_headers, ClobCredentials};
+use crate::execution::signing::{
+    build_l2_headers, calculate_amounts, sign_clob_order, ClobCredentials,
+};
 use crate::types::{ActiveOrder, OrderRequest, OrderResponse, Outcome, Side};
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -77,20 +79,67 @@ impl ExecutionEngine {
             return self.simulate_order(req).await;
         }
 
-        let nonce = Uuid::new_v4().to_string();
+        let side_u8: u8 = match req.side {
+            Side::Buy => 0,
+            Side::Sell => 1,
+        };
+
+        let (maker_amount, taker_amount) =
+            calculate_amounts(req.price, req.size, &req.side, req.neg_risk);
+
+        // Build EIP-712 signed order.
+        // POLY_PRIVATE_KEY  — Ethereum private key for the trading wallet
+        // POLY_FUNDER_ADDRESS — address of the Gnosis Safe / proxy wallet (maker)
+        let private_key = &self.config.polymarket.private_key;
+        let funder_address = &self.config.polymarket.funder_address;
+
+        if private_key.is_empty() {
+            bail!(
+                "POLY_PRIVATE_KEY is not set — required for live order placement.\n  \
+                 Set it as an environment variable or in your .env file.\n  \
+                 Obtain your key at https://polymarket.com/profile?tab=api-keys"
+            );
+        }
+        if funder_address.is_empty() {
+            bail!(
+                "POLY_FUNDER_ADDRESS is not set — required for live order placement.\n  \
+                 This is the address of your Polymarket wallet (Gnosis Safe or EOA).\n  \
+                 Obtain it at https://polymarket.com/profile?tab=api-keys"
+            );
+        }
+
+        let (signature, signer_addr, salt) = sign_clob_order(
+            private_key,
+            funder_address,
+            &req.token_id,
+            maker_amount,
+            taker_amount,
+            side_u8,
+            req.fee_rate_bps,
+            self.config.polymarket.signature_type,
+            req.neg_risk,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Order signing failed: {}", e))?;
+
         let body = json!({
-            "tokenID": req.token_id,
-            "price": format!("{:.4}", req.price),
-            "size": format!("{:.2}", req.size),
-            "side": match req.side {
-                Side::Buy => "BUY",
-                Side::Sell => "SELL",
+            "order": {
+                "salt": salt,
+                "maker": funder_address,
+                "signer": signer_addr,
+                "taker": "0x0000000000000000000000000000000000000000",
+                "tokenId": req.token_id,
+                "makerAmount": maker_amount.to_string(),
+                "takerAmount": taker_amount.to_string(),
+                "expiration": "0",
+                "nonce": "0",
+                "feeRateBps": req.fee_rate_bps.to_string(),
+                "side": side_u8.to_string(),
+                "signatureType": self.config.polymarket.signature_type.to_string(),
+                "signature": signature,
             },
-            "feeRateBps": req.fee_rate_bps.to_string(),
-            "nonce": nonce,
-            "expiration": "0",
-            "taker": "0x0000000000000000000000000000000000000000",
-            "postOnly": req.post_only,
+            "owner": funder_address,
+            "orderType": if req.post_only { "GTD" } else { "GTC" },
         });
 
         let body_str = body.to_string();
@@ -103,12 +152,18 @@ impl ExecutionEngine {
         }
 
         let http_resp = request.send().await?;
-        if http_resp.status() == reqwest::StatusCode::FORBIDDEN {
+        let status = http_resp.status();
+        if status == reqwest::StatusCode::FORBIDDEN {
             warn!(
                 "Order placement returned 403 Forbidden — API credentials invalid or missing.\n  \
                  Required env vars: POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE, POLY_FUNDER_ADDRESS\n  \
-                 Get credentials from: https://polymarket.com/profile?tab=api-keys\n  \
-                 Set simulation = true in config.toml to test without credentials."
+                 Get credentials from: https://polymarket.com/profile?tab=api-keys"
+            );
+        } else if status == reqwest::StatusCode::UNAUTHORIZED {
+            warn!(
+                "Order placement returned 401 Unauthorized — HMAC signature or EIP-712 signature is invalid.\n  \
+                 Check that POLY_API_SECRET is exactly as shown at https://polymarket.com/profile?tab=api-keys\n  \
+                 and POLY_PRIVATE_KEY matches the wallet registered with Polymarket."
             );
         }
         let resp = http_resp.error_for_status()?;

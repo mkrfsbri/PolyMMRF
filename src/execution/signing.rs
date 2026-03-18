@@ -10,6 +10,15 @@ use sha2::Sha256;
 use std::str::FromStr;
 use tracing::debug;
 
+// alloy EIP-712 signing
+use alloy::{
+    primitives::{Address, U256},
+    signers::{local::PrivateKeySigner, Signer},
+    sol,
+    sol_types::eip712_domain,
+};
+use alloy::sol_types::SolStruct;
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 pub const POLYGON_CHAIN_ID: u64 = 137;
@@ -19,6 +28,119 @@ pub const CTF_EXCHANGE: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 pub const NEG_RISK_CTF_EXCHANGE: &str = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
 /// Polymarket Gnosis Safe factory
 pub const SAFE_FACTORY: &str = "0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2";
+
+// ── EIP-712 Order struct ──────────────────────────────────────────────────────
+//
+// Field names and types must match exactly what Polymarket's CTF Exchange
+// contract expects; any deviation produces an invalid signature.
+
+sol! {
+    #[derive(Debug)]
+    struct Order {
+        uint256 salt;
+        address maker;
+        address signer;
+        address taker;
+        uint256 tokenId;
+        uint256 makerAmount;
+        uint256 takerAmount;
+        uint256 expiration;
+        uint256 nonce;
+        uint256 feeRateBps;
+        uint8 side;
+        uint8 signatureType;
+    }
+}
+
+// ── EIP-712 Order Signing ─────────────────────────────────────────────────────
+
+/// Build and sign a Polymarket CLOB limit order using EIP-712.
+///
+/// Returns `(signature_hex, signer_address_hex, salt_decimal_string)`.
+///
+/// # Parameters
+/// - `private_key`    — hex-encoded Ethereum private key (with or without `0x`)
+/// - `maker_address`  — POLY_FUNDER_ADDRESS (the wallet that will hold shares)
+/// - `token_id`       — decimal token ID from the market (e.g. clobTokenIds[0])
+/// - `maker_amount`   — USDC 6-decimal units (for BUY: price * size * 1e6)
+/// - `taker_amount`   — share 6-decimal units (for BUY: size * 1e6)
+/// - `side`           — 0 = BUY, 1 = SELL
+/// - `fee_rate_bps`   — e.g. 1000 for 10%
+/// - `sig_type`       — 0 = EOA, 1 = POLY_PROXY, 2 = POLY_GNOSIS_SAFE
+/// - `neg_risk`       — true → use NegRisk CTF Exchange contract
+pub async fn sign_clob_order(
+    private_key: &str,
+    maker_address: &str,
+    token_id: &str,
+    maker_amount: u128,
+    taker_amount: u128,
+    side: u8,
+    fee_rate_bps: u32,
+    sig_type: u8,
+    neg_risk: bool,
+) -> Result<(String, String, String)> {
+    let local_signer: PrivateKeySigner = private_key
+        .parse()
+        .map_err(|_| anyhow::anyhow!(
+            "Invalid POLY_PRIVATE_KEY — must be a 64-hex-char Ethereum private key.\n  \
+             Obtain your key at https://polymarket.com/profile?tab=api-keys"
+        ))?;
+
+    let signer_addr = local_signer.address();
+
+    let maker: Address = maker_address.parse().map_err(|_| {
+        anyhow::anyhow!("Invalid POLY_FUNDER_ADDRESS: '{}'", maker_address)
+    })?;
+
+    let token_id_u256: U256 = token_id.parse().map_err(|_| {
+        anyhow::anyhow!("Invalid token_id (expected decimal integer): '{}'", token_id)
+    })?;
+
+    // Salt: lower 64-bits of nanosecond timestamp — unique per call
+    let salt_u64 = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()) as u64;
+    let salt = U256::from(salt_u64);
+
+    let order = Order {
+        salt,
+        maker,
+        signer: signer_addr,
+        taker: Address::ZERO,
+        tokenId: token_id_u256,
+        makerAmount: U256::from(maker_amount),
+        takerAmount: U256::from(taker_amount),
+        expiration: U256::ZERO,
+        nonce: U256::ZERO,
+        feeRateBps: U256::from(fee_rate_bps as u64),
+        side,
+        signatureType: sig_type,
+    };
+
+    let verifying_contract: Address = if neg_risk {
+        NEG_RISK_CTF_EXCHANGE.parse()?
+    } else {
+        CTF_EXCHANGE.parse()?
+    };
+
+    let domain = eip712_domain! {
+        name: "CTF Exchange",
+        version: "1",
+        chain_id: POLYGON_CHAIN_ID,
+        verifying_contract: verifying_contract,
+    };
+
+    let sig = local_signer
+        .sign_typed_data(&order, &domain)
+        .await
+        .map_err(|e| anyhow::anyhow!("EIP-712 signing failed: {}", e))?;
+
+    let sig_bytes = sig.as_bytes();
+    let sig_hex = format!("0x{}", hex::encode(sig_bytes));
+    let signer_hex = format!("{:?}", signer_addr);
+
+    Ok((sig_hex, signer_hex, salt.to_string()))
+}
 
 // ── Credentials ───────────────────────────────────────────────────────────────
 
