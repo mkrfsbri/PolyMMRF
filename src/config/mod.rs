@@ -26,7 +26,7 @@ impl Default for PolymarketConfig {
             gamma_api_url: "https://gamma-api.polymarket.com".into(),
             private_key: String::new(),
             funder_address: String::new(),
-            signature_type: 0,
+            signature_type: 1, // POLY_PROXY — default for Magic Link / email accounts
             chain_id: 137,
         }
     }
@@ -264,6 +264,12 @@ impl BotConfig {
         }
         if let Ok(fa) = std::env::var("POLY_FUNDER_ADDRESS") {
             cfg.polymarket.funder_address = fa;
+        }
+        // 0 = EOA, 1 = POLY_PROXY (Magic Link / email), 2 = POLY_GNOSIS_SAFE
+        if let Ok(st) = std::env::var("POLY_SIGNATURE_TYPE") {
+            if let Ok(v) = st.parse::<u8>() {
+                cfg.polymarket.signature_type = v;
+            }
         }
 
         // Migrate deprecated market_type → market_types
