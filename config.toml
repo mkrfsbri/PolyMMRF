@@ -15,8 +15,9 @@ gamma_api_url   = "https://gamma-api.polymarket.com"
 funder_address  = ""
 # Private key (override with POLY_PRIVATE_KEY env var — NEVER commit real key)
 private_key     = ""
-# Signature type: 0=EOA, 1=Proxy, 2=GnosisSafe
-signature_type  = 0
+# Signature type: 0=EOA, 1=POLY_PROXY (Magic Link / email login), 2=POLY_GNOSIS_SAFE
+# Override at runtime with env var: POLY_SIGNATURE_TYPE=1
+signature_type  = 1
 # Polygon (MATIC) chain ID
 chain_id        = 137
 
