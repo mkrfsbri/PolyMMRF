@@ -144,7 +144,7 @@ pub async fn sign_clob_order(
 
 // ── Credentials ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClobCredentials {
     pub api_key: String,
     pub api_secret: String,

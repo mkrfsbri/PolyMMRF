@@ -11,6 +11,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.8] - 2026-03-18
+
+### Added
+
+- **`src/auth/mod.rs` — API key lifecycle management**
+
+  New module that validates and auto-regenerates Polymarket L2 API credentials
+  on every startup, so the bot never silently fails with stale or missing keys.
+
+  **Flow** (called from `main.rs`, before any trading infrastructure starts):
+  1. Read `POLY_API_KEY / _SECRET / _PASSPHRASE` from the environment.
+  2. `GET /auth/api-keys` with L2 HMAC headers — if HTTP 200 the key is valid
+     and the function returns immediately.
+  3. If invalid or missing: `GET /auth/derive-api-key` with **L1 EIP-712
+     headers** — deterministic derivation, returns the same key every time for
+     a given private key.
+  4. If derivation fails: `POST /auth/api-key` with L1 headers — creates a new
+     random key.
+  5. Fresh credentials are written back to `.env` (lines are replaced in-place,
+     other vars are preserved) **and** applied to the running process via
+     `std::env::set_var` so the execution engine picks them up without a
+     restart.
+
+  **L1 Authentication** (EIP-712):
+  ```
+  Domain:  { name: "ClobAuthDomain", version: "1", chainId: 137 }
+  Struct:  ClobAuth {
+             string address    — funder wallet address
+             string timestamp  — Unix timestamp as string
+             uint256 nonce     — 0 for derivation
+             string message    — "This message attests that I control the given wallet"
+           }
+  Headers: POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_NONCE
+  ```
+
+  The module is a no-op in `simulation = true` mode — no credentials needed
+  for simulation.
+
+  Reference: <https://docs.polymarket.com/developers/CLOB/authentication>
+
+---
+
 ## [0.4.7] - 2026-03-18
 
 ### Fixed

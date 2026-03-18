@@ -1,3 +1,4 @@
+mod auth;
 mod config;
 mod data;
 mod execution;
@@ -22,7 +23,7 @@ use types::{BotState, DataEvent};
 
 const BANNER: &str = r#"
 ╔═══════════════════════════════════════════════════════╗
-║       Polymarket Market Making Bot  v0.4.7            ║
+║       Polymarket Market Making Bot  v0.4.8            ║
 ║       Strategy: Maker Rebate Farming (BTC Up/Down)    ║
 ╚═══════════════════════════════════════════════════════╝
 "#;
@@ -72,6 +73,11 @@ async fn main() -> Result<()> {
         config.risk.max_exposure_pct * 100.0,
         config.risk.daily_loss_limit_pct * 100.0
     );
+
+    // ── API key validation / auto-regeneration ────────────────────────────────
+    // Runs before any trading infrastructure is spun up.
+    // In simulation mode this is a no-op.
+    auth::ensure_valid_credentials(&config, ".env").await;
 
     // ── Core Infrastructure ───────────────────────────────────────────────────
     let state = BotState::new();
