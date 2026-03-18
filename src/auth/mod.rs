@@ -87,7 +87,6 @@ struct ApiKeysListResponse {
 /// requiring any pre-existing API credentials.
 async fn build_l1_headers(
     private_key: &str,
-    funder_address: &str,
     nonce: u64,
 ) -> Result<Vec<(String, String)>> {
     let local_signer: PrivateKeySigner = private_key.parse().map_err(|_| {
@@ -96,10 +95,13 @@ async fn build_l1_headers(
         )
     })?;
 
+    // L1 auth must use the signer's own EOA, not the proxy/funder address.
+    let signer_address = format!("{:?}", local_signer.address());
+
     let timestamp = chrono::Utc::now().timestamp().to_string();
 
     let auth_struct = ClobAuth {
-        address: funder_address.to_string(),
+        address: signer_address.clone(),
         timestamp: timestamp.clone(),
         nonce: U256::from(nonce),
         message: CLOB_AUTH_MESSAGE.to_string(),
@@ -127,7 +129,7 @@ async fn build_l1_headers(
     let sig_hex = format!("0x{}", hex::encode(adjusted));
 
     Ok(vec![
-        ("POLY_ADDRESS".into(), funder_address.to_string()),
+        ("POLY_ADDRESS".into(), signer_address),
         ("POLY_SIGNATURE".into(), sig_hex),
         ("POLY_TIMESTAMP".into(), timestamp),
         ("POLY_NONCE".into(), nonce.to_string()),
@@ -185,9 +187,8 @@ async fn derive_api_key(
     client: &Client,
     clob_url: &str,
     private_key: &str,
-    funder_address: &str,
 ) -> Result<ApiKeyResponse> {
-    let headers = build_l1_headers(private_key, funder_address, 0).await?;
+    let headers = build_l1_headers(private_key, 0).await?;
 
     let url = format!("{}/auth/derive-api-key", clob_url);
     let mut req = client.get(&url);
@@ -216,10 +217,9 @@ async fn create_api_key(
     client: &Client,
     clob_url: &str,
     private_key: &str,
-    funder_address: &str,
     nonce: u64,
 ) -> Result<ApiKeyResponse> {
-    let headers = build_l1_headers(private_key, funder_address, nonce).await?;
+    let headers = build_l1_headers(private_key, nonce).await?;
 
     let url = format!("{}/auth/api-key", clob_url);
     let mut req = client.post(&url).header("Content-Type", "application/json");
@@ -358,7 +358,7 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
     );
 
     // ── Step 2: derive (deterministic) ───────────────────────────────────────
-    match derive_api_key(&client, clob_url, private_key, funder_address).await {
+    match derive_api_key(&client, clob_url, private_key).await {
         Ok(new_creds) => {
             info!(
                 "Derived API key successfully (key={}…)",
@@ -377,7 +377,7 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
 
     // ── Step 3: create new random key ────────────────────────────────────────
     let nonce = chrono::Utc::now().timestamp() as u64;
-    match create_api_key(&client, clob_url, private_key, funder_address, nonce).await {
+    match create_api_key(&client, clob_url, private_key, nonce).await {
         Ok(new_creds) => {
             info!(
                 "Created new API key successfully (key={}…)",
