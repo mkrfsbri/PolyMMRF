@@ -325,6 +325,18 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
         return;
     }
 
+    // Escape hatch: set POLY_SKIP_L1_AUTH=true to skip auto-regen entirely.
+    // Use this when you have set POLY_API_KEY/SECRET/PASSPHRASE manually from
+    // polymarket.com/profile → API Keys, and L1 auth is not expected to work
+    // (e.g. Magic Link account where the exported key doesn't match the proxy).
+    if std::env::var("POLY_SKIP_L1_AUTH")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false)
+    {
+        info!("POLY_SKIP_L1_AUTH=true — skipping automatic key derivation, using .env credentials as-is");
+        return;
+    }
+
     let private_key = &config.polymarket.private_key;
     let funder_address = &config.polymarket.funder_address;
 
@@ -337,6 +349,16 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
         );
         return;
     }
+
+    // Derive and log the signer address so mismatches are immediately visible.
+    let signer_addr_display = match private_key.parse::<PrivateKeySigner>() {
+        Ok(s) => format!("{:?}", s.address()),
+        Err(_) => "<invalid key>".into(),
+    };
+    info!(
+        "L1 auth — signer EOA: {}  proxy (funder): {}  sig_type: {}",
+        signer_addr_display, funder_address, config.polymarket.signature_type
+    );
 
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -371,7 +393,30 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
             return;
         }
         Err(e) => {
-            warn!("Credential derivation failed: {} — trying creation …", e);
+            let hint = if e.to_string().contains("401") {
+                // 401 on L1 auth almost always means the private key is not
+                // registered with Polymarket as controlling the given proxy.
+                // For Magic Link (POLY_PROXY) accounts this happens when the
+                // exported key is not the original Magic Link session key.
+                format!(
+                    "\n  Signer EOA derived from POLY_PRIVATE_KEY : {}\n  \
+                     Proxy wallet (POLY_FUNDER_ADDRESS)         : {}\n  \
+                     \n  \
+                     Polymarket rejected the signature — the private key is not\n  \
+                     registered as a signer for the proxy wallet.\n  \
+                     \n  \
+                     FIX — choose one:\n  \
+                     A) Re-export your key from polymarket.com → Profile → Export Key.\n  \
+                        The correct key derives to the proxy address shown there.\n  \
+                     B) Copy your existing API key from polymarket.com/profile → API Keys\n  \
+                        and paste POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE into .env,\n  \
+                        then add POLY_SKIP_L1_AUTH=true to skip this auto-regen step.",
+                    signer_addr_display, funder_address
+                )
+            } else {
+                String::new()
+            };
+            warn!("Credential derivation failed: {}{} — trying creation …", e, hint);
         }
     }
 
@@ -392,8 +437,16 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
             warn!(
                 "Failed to create API key: {}\n  \
                  Bot will continue but orders will fail with 401 Unauthorized.\n  \
-                 Manually set POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE\n  \
-                 from https://polymarket.com/profile?tab=api-keys",
+                 \n  \
+                 To fix: manually set the three lines below in your .env file,\n  \
+                 then add POLY_SKIP_L1_AUTH=true to skip this auto-regen step:\n  \
+                 \n  \
+                 POLY_API_KEY=<key>\n  \
+                 POLY_API_SECRET=<secret>\n  \
+                 POLY_API_PASSPHRASE=<passphrase>\n  \
+                 POLY_SKIP_L1_AUTH=true\n  \
+                 \n  \
+                 Obtain the values at: https://polymarket.com/profile?tab=api-keys",
                 e
             );
         }
