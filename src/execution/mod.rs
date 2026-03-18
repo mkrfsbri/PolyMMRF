@@ -142,6 +142,10 @@ impl ExecutionEngine {
             funder_address.as_str()
         };
 
+        // Field types must match exactly what Polymarket's CLOB expects:
+        //   uint256 fields → decimal strings (JS can't hold uint256 as a number)
+        //   uint8 fields   → JSON integers (side, signatureType)
+        //   address fields → lowercase hex strings
         let body = json!({
             "order": {
                 "salt": salt,
@@ -154,8 +158,8 @@ impl ExecutionEngine {
                 "expiration": "0",
                 "nonce": "0",
                 "feeRateBps": req.fee_rate_bps.to_string(),
-                "side": side_u8.to_string(),
-                "signatureType": sig_type.to_string(),
+                "side": side_u8,
+                "signatureType": sig_type,
                 "signature": signature,
             },
             "owner": order_maker,
@@ -173,20 +177,27 @@ impl ExecutionEngine {
 
         let http_resp = request.send().await?;
         let status = http_resp.status();
-        if status == reqwest::StatusCode::FORBIDDEN {
-            warn!(
-                "Order placement returned 403 Forbidden — API credentials invalid or missing.\n  \
-                 Required env vars: POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE, POLY_FUNDER_ADDRESS\n  \
-                 Get credentials from: https://polymarket.com/profile?tab=api-keys"
-            );
-        } else if status == reqwest::StatusCode::UNAUTHORIZED {
-            warn!(
-                "Order placement returned 401 Unauthorized — HMAC signature or EIP-712 signature is invalid.\n  \
-                 Check that POLY_API_SECRET is exactly as shown at https://polymarket.com/profile?tab=api-keys\n  \
-                 and POLY_PRIVATE_KEY matches the wallet registered with Polymarket."
-            );
+        if !status.is_success() {
+            let raw_body = http_resp.text().await.unwrap_or_default();
+            match status {
+                reqwest::StatusCode::UNAUTHORIZED => warn!(
+                    "POST /order → 401 Unauthorized\n  \
+                     Polymarket response: {}\n  \
+                     maker={} signer={} sig_type={}\n  \
+                     Check POLY_API_KEY/SECRET/PASSPHRASE match the account for this signer.",
+                    raw_body, order_maker, signer_addr, sig_type
+                ),
+                reqwest::StatusCode::FORBIDDEN => warn!(
+                    "POST /order → 403 Forbidden\n  \
+                     Polymarket response: {}\n  \
+                     Ensure POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE are set.",
+                    raw_body
+                ),
+                _ => warn!("POST /order → HTTP {}: {}", status, raw_body),
+            }
+            bail!("HTTP status client error ({} {}) for url ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), format!("{}/order", self.config.polymarket.clob_api_url));
         }
-        let resp = http_resp.error_for_status()?;
+        let resp = http_resp;
         let v: serde_json::Value = resp.json().await?;
 
         let order_id = v["orderID"]
