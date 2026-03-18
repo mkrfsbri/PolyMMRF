@@ -69,8 +69,18 @@ impl ExecutionEngine {
         path: &str,
         body: &str,
     ) -> Result<Vec<(String, String)>> {
+        self.auth_headers_with_address(method, path, body, &self.credentials.address)
+    }
+
+    fn auth_headers_with_address(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+        address: &str,
+    ) -> Result<Vec<(String, String)>> {
         let mut headers = build_l2_headers(&self.credentials, method, path, body)?;
-        headers.push(("POLY-ADDRESS".into(), self.credentials.address.clone()));
+        headers.push(("POLY-ADDRESS".into(), address.to_string()));
         Ok(headers)
     }
 
@@ -108,6 +118,8 @@ impl ExecutionEngine {
             );
         }
 
+        let sig_type = self.config.polymarket.signature_type;
+
         let (signature, signer_addr, salt) = sign_clob_order(
             private_key,
             funder_address,
@@ -116,16 +128,24 @@ impl ExecutionEngine {
             taker_amount,
             side_u8,
             req.fee_rate_bps,
-            self.config.polymarket.signature_type,
+            sig_type,
             req.neg_risk,
         )
         .await
         .map_err(|e| anyhow::anyhow!("Order signing failed: {}", e))?;
 
+        // For EOA (sig_type 0) the contract requires maker == signer (same address).
+        // For POLY_PROXY (sig_type 1) maker = proxy wallet, signer = controlling EOA.
+        let order_maker = if sig_type == 0 {
+            signer_addr.as_str()
+        } else {
+            funder_address.as_str()
+        };
+
         let body = json!({
             "order": {
                 "salt": salt,
-                "maker": funder_address,
+                "maker": order_maker,
                 "signer": signer_addr,
                 "taker": "0x0000000000000000000000000000000000000000",
                 "tokenId": req.token_id,
@@ -135,15 +155,15 @@ impl ExecutionEngine {
                 "nonce": "0",
                 "feeRateBps": req.fee_rate_bps.to_string(),
                 "side": side_u8.to_string(),
-                "signatureType": self.config.polymarket.signature_type.to_string(),
+                "signatureType": sig_type.to_string(),
                 "signature": signature,
             },
-            "owner": funder_address,
-            "orderType": if req.post_only { "GTD" } else { "GTC" },
+            "owner": order_maker,
+            "orderType": "GTC",
         });
 
         let body_str = body.to_string();
-        let headers = self.auth_headers("POST", "/order", &body_str)?;
+        let headers = self.auth_headers_with_address("POST", "/order", &body_str, order_maker)?;
         let path = format!("{}/order", self.config.polymarket.clob_api_url);
 
         let mut request = self.client.post(&path).json(&body);
