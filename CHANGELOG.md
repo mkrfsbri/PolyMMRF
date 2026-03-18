@@ -11,6 +11,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.7] - 2026-03-18
+
+### Fixed
+
+- **401 Unauthorized — order body was not EIP-712 signed**
+  (`src/execution/mod.rs`, `src/execution/signing.rs`, `Cargo.toml`)
+
+  The Polymarket CLOB `POST /order` endpoint does not accept a plain JSON
+  payload. Each order must be signed with the trader's Ethereum private key
+  using EIP-712 typed-data signing, and the cryptographic signature must be
+  included in the request body. We were sending an unsigned JSON object, so
+  every order was rejected with 401 regardless of whether the HMAC headers
+  were correct.
+
+  **Fix:**
+  - Added `sign_clob_order()` to `signing.rs` using `alloy` EIP-712:
+    - Defines the `Order` struct via `sol!` macro (field names match the
+      on-chain CTF Exchange contract exactly)
+    - Domain: `name="CTF Exchange"`, `version="1"`, `chainId=137`,
+      `verifyingContract` = CTF Exchange or NegRisk CTF Exchange
+    - Signs with `PrivateKeySigner` from `POLY_PRIVATE_KEY` env var
+  - Added `"eip712"` to alloy features in `Cargo.toml`
+  - Rewrote `place_order()` to build the correct signed order body:
+    ```json
+    { "order": { "salt": "...", "maker": "0x...", "signer": "0x...",
+                 "tokenId": "...", "makerAmount": "...", "takerAmount": "...",
+                 "feeRateBps": "...", "side": "0", "signatureType": "0",
+                 "signature": "0x..." },
+      "owner": "0x...", "orderType": "GTC" }
+    ```
+  - Added `neg_risk: bool` to `OrderRequest`; populated from `Market.neg_risk`
+    in the strategy so the correct verifying contract is used
+  - Added actionable 401 Unauthorized warning (distinct from 403 Forbidden)
+
+  **Required env vars for live trading:**
+  ```
+  POLY_PRIVATE_KEY        — Ethereum private key of your trading EOA
+  POLY_FUNDER_ADDRESS     — Address of your Polymarket wallet (Safe or EOA)
+  POLY_API_KEY            — L2 API key
+  POLY_API_SECRET         — L2 API secret (base64)
+  POLY_API_PASSPHRASE     — L2 API passphrase
+  ```
+
+---
+
 ## [0.4.6] - 2026-03-17
 
 ### Fixed

@@ -164,6 +164,9 @@ pub struct OrderRequest {
     pub outcome: Outcome,
     pub fee_rate_bps: u32,
     pub post_only: bool,
+    /// Whether this market uses the NegRisk CTF Exchange contract.
+    /// Determines which verifying contract is used in the EIP-712 domain.
+    pub neg_risk: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

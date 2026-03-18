@@ -391,6 +391,7 @@ impl MarketMakingStrategy {
                 outcome: Outcome::Up,
                 fee_rate_bps: market.fee_rate_bps,
                 post_only: self.config.strategy.post_only,
+                neg_risk: market.neg_risk,
             })
             .await?;
         self.up_order_ids.push(up_resp.order_id);
@@ -406,6 +407,7 @@ impl MarketMakingStrategy {
                 outcome: Outcome::Down,
                 fee_rate_bps: market.fee_rate_bps,
                 post_only: self.config.strategy.post_only,
+                neg_risk: market.neg_risk,
             })
             .await?;
         self.down_order_ids.push(down_resp.order_id);
