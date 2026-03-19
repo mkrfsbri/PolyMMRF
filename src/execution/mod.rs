@@ -26,7 +26,20 @@ pub struct ExecutionEngine {
 impl ExecutionEngine {
     pub fn new(config: BotConfig, state: Arc<crate::types::BotState>) -> Result<Self> {
         let simulation = config.bot.simulation;
-        let credentials = ClobCredentials::from_env()?;
+        let mut credentials = ClobCredentials::from_env()?;
+
+        // For EOA (sig_type 0) the POLY-ADDRESS header must be the signing EOA,
+        // not POLY_FUNDER_ADDRESS (which may still hold an old proxy address).
+        // Derive it from the private key and override credentials.address so that
+        // ALL L2 auth calls (place_order, cancel_order, validation) use the right
+        // address without needing per-call knowledge of sig_type.
+        if config.polymarket.signature_type == 0 && !config.polymarket.private_key.is_empty() {
+            use alloy::signers::local::PrivateKeySigner;
+            if let Ok(signer) = config.polymarket.private_key.parse::<PrivateKeySigner>() {
+                credentials.address = format!("{:?}", signer.address());
+            }
+        }
+
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;

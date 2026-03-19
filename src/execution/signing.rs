@@ -88,9 +88,17 @@ pub async fn sign_clob_order(
 
     let signer_addr = local_signer.address();
 
-    let maker: Address = maker_address.parse().map_err(|_| {
-        anyhow::anyhow!("Invalid POLY_FUNDER_ADDRESS: '{}'", maker_address)
-    })?;
+    // For EOA (sig_type 0) the CTF Exchange contract requires maker == signer.
+    // The EIP-712 struct hash must use the same address that appears in the JSON
+    // request body, otherwise the server's signature reconstruction fails.
+    // For POLY_PROXY / GnosisSafe (sig_type 1/2): maker = proxy/safe wallet.
+    let maker: Address = if sig_type == 0 {
+        signer_addr
+    } else {
+        maker_address.parse().map_err(|_| {
+            anyhow::anyhow!("Invalid POLY_FUNDER_ADDRESS: '{}'", maker_address)
+        })?
+    };
 
     let token_id_u256: U256 = token_id.parse().map_err(|_| {
         anyhow::anyhow!("Invalid token_id (expected decimal integer): '{}'", token_id)
