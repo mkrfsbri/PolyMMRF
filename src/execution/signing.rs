@@ -210,7 +210,7 @@ pub fn build_hmac_signature(
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
 
-    Ok(B64.encode(result))
+    Ok(URL_SAFE_NO_PAD.encode(result))
 }
 
 /// Build L2 auth headers for a CLOB API request.
@@ -224,10 +224,10 @@ pub fn build_l2_headers(
     let sig = build_hmac_signature(&creds.api_secret, timestamp, method, path, body)?;
 
     Ok(vec![
-        ("POLY-API-KEY".into(), creds.api_key.clone()),
-        ("POLY-SIGNATURE".into(), sig),
-        ("POLY-TIMESTAMP".into(), timestamp.to_string()),
-        ("POLY-PASSPHRASE".into(), creds.api_passphrase.clone()),
+        ("POLY_API_KEY".into(), creds.api_key.clone()),
+        ("POLY_SIGNATURE".into(), sig),
+        ("POLY_TIMESTAMP".into(), timestamp.to_string()),
+        ("POLY_PASSPHRASE".into(), creds.api_passphrase.clone()),
     ])
 }
 

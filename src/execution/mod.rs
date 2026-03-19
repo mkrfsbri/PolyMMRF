@@ -93,7 +93,7 @@ impl ExecutionEngine {
         address: &str,
     ) -> Result<Vec<(String, String)>> {
         let mut headers = build_l2_headers(&self.credentials, method, path, body)?;
-        headers.push(("POLY-ADDRESS".into(), address.to_string()));
+        headers.push(("POLY_ADDRESS".into(), address.to_string()));
         Ok(headers)
     }
 
