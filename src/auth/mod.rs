@@ -178,7 +178,7 @@ async fn is_credential_valid(
     }
     // POLY-ADDRESS is required by Polymarket's L2 auth; without it the server
     // returns 401 even with a valid API key, causing spurious credential regen.
-    req = req.header("POLY-ADDRESS", creds.address.as_str());
+    req = req.header("POLY_ADDRESS", creds.address.as_str());
 
     match req.send().await {
         Ok(resp) => {
