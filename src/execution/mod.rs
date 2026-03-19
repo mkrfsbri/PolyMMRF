@@ -187,7 +187,7 @@ impl ExecutionEngine {
                 "expiration": "0",
                 "nonce": "0",
                 "feeRateBps": "0",
-                "side": side_str,
+                "side": side_u8,
                 "signatureType": sig_type,
                 "signature": signature,
             },
