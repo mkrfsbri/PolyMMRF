@@ -568,7 +568,10 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         market_type,
         asset,
         fee_rate_bps,
-        neg_risk: v["neg_risk"].as_bool().unwrap_or(false),
+        // CLOB API uses snake_case; some responses use camelCase — try both.
+        neg_risk: v["neg_risk"].as_bool()
+            .or_else(|| v["negRisk"].as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -629,7 +632,10 @@ fn parse_gamma_market(
         market_type,
         asset: asset.to_string(),
         fee_rate_bps,
-        neg_risk: v["negRisk"].as_bool().unwrap_or(false),
+        // Gamma API uses camelCase; fall back to snake_case just in case.
+        neg_risk: v["negRisk"].as_bool()
+            .or_else(|| v["neg_risk"].as_bool())
+            .unwrap_or(false),
     })
 }
 
