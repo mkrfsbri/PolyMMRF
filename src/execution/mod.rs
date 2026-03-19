@@ -123,15 +123,19 @@ impl ExecutionEngine {
                  Obtain your key at https://polymarket.com/profile?tab=api-keys"
             );
         }
-        if funder_address.is_empty() {
+
+        let sig_type = self.config.polymarket.signature_type;
+
+        // For PROXY / GnosisSafe (sig_type > 0) the funder address is the maker in
+        // the EIP-712 struct and must be set.  For EOA (sig_type == 0) the maker is
+        // derived from the private key so funder_address is not consulted.
+        if sig_type > 0 && funder_address.is_empty() {
             bail!(
-                "POLY_FUNDER_ADDRESS is not set — required for live order placement.\n  \
-                 This is the address of your Polymarket wallet (Gnosis Safe or EOA).\n  \
+                "POLY_FUNDER_ADDRESS is not set — required for PROXY / GnosisSafe mode.\n  \
+                 This is the address of your Polymarket proxy or Gnosis Safe wallet.\n  \
                  Obtain it at https://polymarket.com/profile?tab=api-keys"
             );
         }
-
-        let sig_type = self.config.polymarket.signature_type;
 
         let (signature, signer_addr, salt) = sign_clob_order(
             private_key,

@@ -7,7 +7,6 @@ use hmac::{Hmac, Mac};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sha2::Sha256;
-use std::str::FromStr;
 use tracing::debug;
 
 // alloy EIP-712 signing
@@ -17,7 +16,6 @@ use alloy::{
     sol,
     sol_types::eip712_domain,
 };
-use alloy::sol_types::SolStruct;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -256,7 +254,7 @@ pub fn calculate_amounts(
     price: Decimal,
     size: Decimal,
     side: &crate::types::Side,
-    neg_risk: bool,
+    _neg_risk: bool,
 ) -> (u128, u128) {
     let usdc_amount = price * size;
     // Convert to 6-decimal units
@@ -300,40 +298,6 @@ pub fn calculate_taker_fee(
 /// Maker rebate = 25% of taker fee
 pub fn estimate_maker_rebate(taker_fee: Decimal) -> Decimal {
     taker_fee * dec!(0.25)
-}
-
-// ── EIP-712 Order Hash (Placeholder) ─────────────────────────────────────────
-
-/// Placeholder struct for a signable order.
-/// In production, use the official `polymarket_client_sdk` or `clob-client-rust`.
-pub struct SignableOrder {
-    pub token_id: String,
-    pub price: Decimal,
-    pub size: Decimal,
-    pub side: crate::types::Side,
-    pub fee_rate_bps: u32,
-    pub nonce: String,
-    pub expiration: String,
-    pub maker: String,
-    pub taker: String,
-    pub neg_risk: bool,
-}
-
-/// Compute EIP-712 struct hash.
-/// NOTE: This is a placeholder. For production use, integrate the official
-/// Polymarket Rust SDK which handles proper ABI encoding and domain separation.
-pub fn compute_order_hash(order: &SignableOrder) -> String {
-    // Placeholder: return a deterministic string for simulation
-    format!(
-        "0x{:064x}",
-        u64::from_str_radix(&order.nonce[..8.min(order.nonce.len())], 16).unwrap_or(0)
-    )
-}
-
-/// Derive Gnosis Safe address for a given EOA via CREATE2.
-/// NOTE: Placeholder — use official SDK for production.
-pub fn derive_safe_address(eoa: &str) -> String {
-    format!("safe-for-{}", eoa)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
