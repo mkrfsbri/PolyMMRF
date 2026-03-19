@@ -280,18 +280,15 @@ pub fn normalize_price(price: Decimal, tick_size: Decimal) -> String {
 /// For a BUY:  maker_amount = size * price (USDC), taker_amount = size (shares)
 /// For a SELL: maker_amount = size (shares), taker_amount = size * price (USDC)
 ///
-/// neg_risk markets invert the token relationship.
+/// neg_risk SELL is special: you sell shares of one outcome and receive USDC
+/// priced at the complement — taker_amount = size * (1 - price).
+/// (Mirrors py-clob-client `build_limit_order_amounts` with is_neg_risk=True.)
 pub fn calculate_amounts(
     price: Decimal,
     size: Decimal,
     side: &crate::types::Side,
-    _neg_risk: bool,
+    neg_risk: bool,
 ) -> (u128, u128) {
-    let usdc_amount = price * size;
-    // Convert to 6-decimal units
-    let usdc_raw = (usdc_amount * Decimal::new(1_000_000, 0))
-        .round()
-        .abs();
     let share_raw = (size * Decimal::new(1_000_000, 0))
         .round()
         .abs();
@@ -299,11 +296,19 @@ pub fn calculate_amounts(
     use crate::types::Side;
     match side {
         Side::Buy => {
+            let usdc_raw = (price * size * Decimal::new(1_000_000, 0))
+                .round()
+                .abs();
             let maker = usdc_raw.try_into().unwrap_or(0u128);
             let taker = share_raw.try_into().unwrap_or(0u128);
             (maker, taker)
         }
         Side::Sell => {
+            // neg_risk SELL: taker receives (1-price)*size USDC (complement pricing)
+            let sell_price = if neg_risk { dec!(1) - price } else { price };
+            let usdc_raw = (sell_price * size * Decimal::new(1_000_000, 0))
+                .round()
+                .abs();
             let maker = share_raw.try_into().unwrap_or(0u128);
             let taker = usdc_raw.try_into().unwrap_or(0u128);
             (maker, taker)
@@ -375,6 +380,24 @@ mod tests {
         assert_eq!(maker, 4_500_000);
         // Shares: 10 * 1_000_000 = 10_000_000
         assert_eq!(taker, 10_000_000);
+    }
+
+    #[test]
+    fn test_calculate_amounts_sell_regular() {
+        use crate::types::Side;
+        // Regular SELL at price 0.45, size 10: taker = 0.45*10*1e6 = 4_500_000 USDC
+        let (maker, taker) = calculate_amounts(dec!(0.45), dec!(10.0), &Side::Sell, false);
+        assert_eq!(maker, 10_000_000); // shares
+        assert_eq!(taker, 4_500_000);  // USDC = price * size
+    }
+
+    #[test]
+    fn test_calculate_amounts_sell_neg_risk() {
+        use crate::types::Side;
+        // neg_risk SELL at price 0.45, size 10: taker = (1-0.45)*10*1e6 = 5_500_000 USDC
+        let (maker, taker) = calculate_amounts(dec!(0.45), dec!(10.0), &Side::Sell, true);
+        assert_eq!(maker, 10_000_000); // shares
+        assert_eq!(taker, 5_500_000);  // USDC = (1 - price) * size
     }
 
     #[test]
