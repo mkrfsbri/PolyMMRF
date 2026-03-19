@@ -568,10 +568,12 @@ fn parse_clob_market(v: &serde_json::Value, slug: &str) -> Result<Market> {
         market_type,
         asset,
         fee_rate_bps,
-        // CLOB API uses snake_case; some responses use camelCase — try both.
-        neg_risk: v["neg_risk"].as_bool()
-            .or_else(|| v["negRisk"].as_bool())
-            .unwrap_or(false),
+        // "updown" markets are always neg_risk on Polymarket — they settle against
+        // the NegRisk CTF Exchange contract regardless of what the API field says.
+        // The Gamma API often omits negRisk or returns false for these markets.
+        neg_risk: slug.contains("updown")
+            || v["neg_risk"].as_bool().unwrap_or(false)
+            || v["negRisk"].as_bool().unwrap_or(false),
     })
 }
 
@@ -632,10 +634,12 @@ fn parse_gamma_market(
         market_type,
         asset: asset.to_string(),
         fee_rate_bps,
-        // Gamma API uses camelCase; fall back to snake_case just in case.
-        neg_risk: v["negRisk"].as_bool()
-            .or_else(|| v["neg_risk"].as_bool())
-            .unwrap_or(false),
+        // "updown" markets are always neg_risk on Polymarket — they settle against
+        // the NegRisk CTF Exchange contract regardless of what the API field says.
+        // The Gamma API often omits negRisk or returns false for these markets.
+        neg_risk: slug.contains("updown")
+            || v["negRisk"].as_bool().unwrap_or(false)
+            || v["neg_risk"].as_bool().unwrap_or(false),
     })
 }
 
@@ -962,5 +966,7 @@ mod tests {
         assert_eq!(m.fee_rate_bps, 1000);
         assert_eq!(m.token_id_up, "111");
         assert_eq!(m.token_id_down, "222");
+        // "updown" slug must override negRisk=false from API
+        assert!(m.neg_risk, "btc-updown markets must always be neg_risk=true");
     }
 }
