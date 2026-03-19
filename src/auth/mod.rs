@@ -81,6 +81,8 @@ pub struct ApiKeyResponse {
 async fn build_l1_headers(
     private_key: &str,
     nonce: u64,
+    funder_address: &str,
+    sig_type: u8,
 ) -> Result<Vec<(String, String)>> {
     let local_signer: PrivateKeySigner = private_key.parse().map_err(|_| {
         anyhow::anyhow!(
@@ -88,13 +90,23 @@ async fn build_l1_headers(
         )
     })?;
 
-    // L1 auth must use the signer's own EOA, not the proxy/funder address.
     let signer_address = format!("{:?}", local_signer.address());
+
+    // POLY_ADDRESS in L1 auth determines which account the derived API key is
+    // associated with, and must match the POLY-ADDRESS sent in subsequent L2 calls:
+    //   EOA (0)         → POLY_ADDRESS = signer EOA (signs for itself)
+    //   PROXY/Safe (>0) → POLY_ADDRESS = proxy/safe wallet (funder_address);
+    //                     the server recovers the signer and checks authorization
+    let poly_address = if sig_type == 0 || funder_address.is_empty() {
+        signer_address.clone()
+    } else {
+        funder_address.to_string()
+    };
 
     let timestamp = chrono::Utc::now().timestamp().to_string();
 
     let auth_struct = ClobAuth {
-        address: signer_address.clone(),
+        address: poly_address.clone(),
         timestamp: timestamp.clone(),
         nonce: U256::from(nonce),
         message: CLOB_AUTH_MESSAGE.to_string(),
@@ -122,7 +134,7 @@ async fn build_l1_headers(
     let sig_hex = format!("0x{}", hex::encode(adjusted));
 
     Ok(vec![
-        ("POLY_ADDRESS".into(), signer_address),
+        ("POLY_ADDRESS".into(), poly_address),
         ("POLY_SIGNATURE".into(), sig_hex),
         ("POLY_TIMESTAMP".into(), timestamp),
         ("POLY_NONCE".into(), nonce.to_string()),
@@ -183,8 +195,10 @@ async fn derive_api_key(
     client: &Client,
     clob_url: &str,
     private_key: &str,
+    funder_address: &str,
+    sig_type: u8,
 ) -> Result<ApiKeyResponse> {
-    let headers = build_l1_headers(private_key, 0).await?;
+    let headers = build_l1_headers(private_key, 0, funder_address, sig_type).await?;
 
     let url = format!("{}/auth/derive-api-key", clob_url);
     let mut req = client.get(&url);
@@ -214,8 +228,10 @@ async fn create_api_key(
     clob_url: &str,
     private_key: &str,
     nonce: u64,
+    funder_address: &str,
+    sig_type: u8,
 ) -> Result<ApiKeyResponse> {
-    let headers = build_l1_headers(private_key, nonce).await?;
+    let headers = build_l1_headers(private_key, nonce, funder_address, sig_type).await?;
 
     let url = format!("{}/auth/api-key", clob_url);
     let mut req = client.post(&url).header("Content-Type", "application/json");
@@ -335,13 +351,24 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
 
     let private_key = &config.polymarket.private_key;
     let funder_address = &config.polymarket.funder_address;
+    let sig_type = config.polymarket.signature_type;
 
-    if private_key.is_empty() || funder_address.is_empty() {
+    // POLY_PRIVATE_KEY is always required.
+    // POLY_FUNDER_ADDRESS is only needed for PROXY/Safe (sig_type > 0).
+    if private_key.is_empty() {
         warn!(
-            "POLY_PRIVATE_KEY or POLY_FUNDER_ADDRESS not set — \
-             cannot validate or regenerate API credentials.\n  \
-             Set them in your .env file to enable live trading.\n  \
-             See: https://docs.polymarket.com/developers/CLOB/authentication"
+            "POLY_PRIVATE_KEY not set — cannot validate or regenerate API credentials.\n  \
+             Set it in your .env file to enable live trading."
+        );
+        return;
+    }
+    if sig_type > 0 && funder_address.is_empty() {
+        warn!(
+            "POLY_FUNDER_ADDRESS not set for sig_type={} (PROXY/Safe) — \
+             cannot validate credentials.\n  \
+             Set POLY_FUNDER_ADDRESS to your proxy wallet address, or set \
+             POLY_SIGNATURE_TYPE=0 if you are using an EOA account.",
+            sig_type
         );
         return;
     }
@@ -351,10 +378,21 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
         Ok(s) => format!("{:?}", s.address()),
         Err(_) => "<invalid key>".into(),
     };
-    info!(
-        "L1 auth — signer EOA: {}  proxy (funder): {}  sig_type: {}",
-        signer_addr_display, funder_address, config.polymarket.signature_type
-    );
+
+    // Sanity hint: PROXY mode with an empty or mismatched funder_address is a
+    // common misconfiguration for users who have EOA accounts but haven't set
+    // POLY_SIGNATURE_TYPE=0.
+    if sig_type > 0 {
+        info!(
+            "L1 auth — sig_type={} (PROXY/Safe) | signer EOA: {} | proxy (funder): {}",
+            sig_type, signer_addr_display, funder_address
+        );
+    } else {
+        info!(
+            "L1 auth — sig_type=0 (EOA) | signer/account: {}",
+            signer_addr_display
+        );
+    }
 
     let client = Client::builder()
         .timeout(Duration::from_secs(15))
@@ -362,7 +400,15 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
         .expect("HTTP client build");
 
     let clob_url = &config.polymarket.clob_api_url;
-    let creds = ClobCredentials::from_env().unwrap_or_default();
+    let mut creds = ClobCredentials::from_env().unwrap_or_default();
+
+    // For EOA (sig_type 0) the API key is associated with the signer EOA;
+    // POLY-ADDRESS in L2 validation must match.  For PROXY it is the funder.
+    creds.address = if sig_type == 0 {
+        signer_addr_display.clone()
+    } else {
+        funder_address.clone()
+    };
 
     // ── Step 1: validate existing credentials ────────────────────────────────
     if is_credential_valid(&client, clob_url, &creds).await {
@@ -376,7 +422,7 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
     );
 
     // ── Step 2: derive (deterministic) ───────────────────────────────────────
-    match derive_api_key(&client, clob_url, private_key).await {
+    match derive_api_key(&client, clob_url, private_key, funder_address, sig_type).await {
         Ok(new_creds) => {
             info!(
                 "Derived API key successfully (key={}…)",
@@ -390,25 +436,34 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
         }
         Err(e) => {
             let hint = if e.to_string().contains("401") {
-                // 401 on L1 auth almost always means the private key is not
-                // registered with Polymarket as controlling the given proxy.
-                // For Magic Link (POLY_PROXY) accounts this happens when the
-                // exported key is not the original Magic Link session key.
-                format!(
-                    "\n  Signer EOA derived from POLY_PRIVATE_KEY : {}\n  \
-                     Proxy wallet (POLY_FUNDER_ADDRESS)         : {}\n  \
-                     \n  \
-                     Polymarket rejected the signature — the private key is not\n  \
-                     registered as a signer for the proxy wallet.\n  \
-                     \n  \
-                     FIX — choose one:\n  \
-                     A) Re-export your key from polymarket.com → Profile → Export Key.\n  \
-                        The correct key derives to the proxy address shown there.\n  \
-                     B) Copy your existing API key from polymarket.com/profile → API Keys\n  \
-                        and paste POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE into .env,\n  \
-                        then add POLY_SKIP_L1_AUTH=true to skip this auto-regen step.",
-                    signer_addr_display, funder_address
-                )
+                if sig_type > 0 {
+                    format!(
+                        "\n  sig_type        : {} (PROXY/Safe)\n  \
+                         Signer EOA      : {}\n  \
+                         Proxy (funder)  : {}\n  \
+                         \n  \
+                         The signer is not authorized for the proxy, OR sig_type is wrong.\n  \
+                         \n  \
+                         FIX — choose one:\n  \
+                         A) If you have an EOA account (not Magic Link): set POLY_SIGNATURE_TYPE=0\n  \
+                            in your .env — the bot will sign as the EOA directly.\n  \
+                         B) If you have a Magic Link / proxy account: the private key must be\n  \
+                            the one exported from polymarket.com → Profile → Export Key.\n  \
+                         C) Paste keys manually from polymarket.com/profile → API Keys and add\n  \
+                            POLY_SKIP_L1_AUTH=true to skip auto-regen.",
+                        sig_type, signer_addr_display, funder_address
+                    )
+                } else {
+                    format!(
+                        "\n  sig_type        : 0 (EOA)\n  \
+                         Signer / account: {}\n  \
+                         \n  \
+                         Polymarket rejected the EOA — it may not have an account yet.\n  \
+                         Paste keys from polymarket.com/profile → API Keys and add\n  \
+                         POLY_SKIP_L1_AUTH=true, or create an account via the web app first.",
+                        signer_addr_display
+                    )
+                }
             } else {
                 String::new()
             };
@@ -418,7 +473,7 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
 
     // ── Step 3: create new random key ────────────────────────────────────────
     let nonce = chrono::Utc::now().timestamp() as u64;
-    match create_api_key(&client, clob_url, private_key, nonce).await {
+    match create_api_key(&client, clob_url, private_key, nonce, funder_address, sig_type).await {
         Ok(new_creds) => {
             info!(
                 "Created new API key successfully (key={}…)",
