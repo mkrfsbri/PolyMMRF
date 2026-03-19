@@ -32,7 +32,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use alloy::{
-    primitives::U256,
+    primitives::{Address, U256},
     signers::{local::PrivateKeySigner, Signer},
     sol,
     sol_types::eip712_domain,
@@ -44,13 +44,13 @@ use crate::execution::signing::{build_l2_headers, ClobCredentials};
 // ── EIP-712 ClobAuth struct ───────────────────────────────────────────────────
 //
 // Field NAMES and TYPES must match the Polymarket contract exactly.
-// Note: `address` here is Solidity `string`, not the `address` primitive —
-// the wallet address is passed as a hex string ("0x..."), not as bytes.
+// Matches the official rs-clob-client: `address` is Solidity `address` type,
+// not `string`.  Using `string` produces a different type hash → wrong sig → 401.
 
 sol! {
     #[derive(Debug)]
     struct ClobAuth {
-        string address;
+        address address;
         string timestamp;
         uint256 nonce;
         string message;
@@ -93,20 +93,25 @@ async fn build_l1_headers(
     let signer_address = format!("{:?}", local_signer.address());
 
     // POLY_ADDRESS in L1 auth determines which account the derived API key is
-    // associated with, and must match the POLY-ADDRESS sent in subsequent L2 calls:
+    // associated with, and must match the POLY-ADDRESS sent in subsequent L2 calls.
+    // L1 headers use underscores; L2 headers use dashes — different conventions.
     //   EOA (0)         → POLY_ADDRESS = signer EOA (signs for itself)
     //   PROXY/Safe (>0) → POLY_ADDRESS = proxy/safe wallet (funder_address);
     //                     the server recovers the signer and checks authorization
-    let poly_address = if sig_type == 0 || funder_address.is_empty() {
+    let poly_address_str = if sig_type == 0 || funder_address.is_empty() {
         signer_address.clone()
     } else {
         funder_address.to_string()
     };
 
+    let poly_address: Address = poly_address_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid address: {}", poly_address_str))?;
+
     let timestamp = chrono::Utc::now().timestamp().to_string();
 
     let auth_struct = ClobAuth {
-        address: poly_address.clone(),
+        address: poly_address,
         timestamp: timestamp.clone(),
         nonce: U256::from(nonce),
         message: CLOB_AUTH_MESSAGE.to_string(),
@@ -134,10 +139,10 @@ async fn build_l1_headers(
     let sig_hex = format!("0x{}", hex::encode(adjusted));
 
     Ok(vec![
-        ("POLY-ADDRESS".into(), poly_address),
-        ("POLY-SIGNATURE".into(), sig_hex),
-        ("POLY-TIMESTAMP".into(), timestamp),
-        ("POLY-NONCE".into(), nonce.to_string()),
+        ("POLY_ADDRESS".into(), poly_address_str),
+        ("POLY_SIGNATURE".into(), sig_hex),
+        ("POLY_TIMESTAMP".into(), timestamp),
+        ("POLY_NONCE".into(), nonce.to_string()),
     ])
 }
 
