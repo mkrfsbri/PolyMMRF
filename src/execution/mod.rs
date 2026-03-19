@@ -163,6 +163,7 @@ impl ExecutionEngine {
         //   uint256 fields → decimal strings (JS can't hold uint256 as a number)
         //   uint8 fields   → JSON integers (side, signatureType)
         //   address fields → lowercase hex strings
+        let side_str = if side_u8 == 0 { "BUY" } else { "SELL" };
         let body = json!({
             "order": {
                 "salt": salt,
@@ -175,12 +176,13 @@ impl ExecutionEngine {
                 "expiration": "0",
                 "nonce": "0",
                 "feeRateBps": req.fee_rate_bps.to_string(),
-                "side": side_u8,
+                "side": side_str,
                 "signatureType": sig_type,
                 "signature": signature,
             },
-            "owner": order_maker,
+            "owner": self.credentials.api_key,
             "orderType": "GTC",
+            "postOnly": false,
         });
 
         let body_str = body.to_string();
