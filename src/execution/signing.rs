@@ -11,10 +11,10 @@ use tracing::debug;
 
 // alloy EIP-712 signing
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, Signature as PrimSig, U256},
     signers::{local::PrivateKeySigner, Signer},
     sol,
-    sol_types::eip712_domain,
+    sol_types::{eip712_domain, SolStruct},
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -142,6 +142,37 @@ pub async fn sign_clob_order(
         .map_err(|e| anyhow::anyhow!("EIP-712 signing failed: {}", e))?;
 
     let sig_bytes = sig.as_bytes();
+
+    // Offline recovery check: verify that the EIP-712 hash + signature recovers
+    // back to the expected signer.  This catches domain/struct mismatches before
+    // the order reaches the server (server returns the same "Invalid order payload"
+    // for both bad JSON format AND bad signature, making server errors hard to debug).
+    let signing_hash = order.eip712_signing_hash(&domain);
+    let prim_sig = PrimSig::try_from(&sig_bytes[..])
+        .map_err(|e| anyhow::anyhow!("Signature parse failed: {}", e))?;
+    let recovered = prim_sig
+        .recover_address_from_prehash(&signing_hash)
+        .map_err(|e| anyhow::anyhow!("Signature recovery failed: {}", e))?;
+    if recovered != signer_addr {
+        return Err(anyhow::anyhow!(
+            "EIP-712 signature self-check FAILED: recovered={:?} expected={:?}\n  \
+             contract={:?} neg_risk={} chain_id={}\n  \
+             This means the Order struct fields or EIP-712 domain do not match \
+             what Polymarket's contract expects.",
+            recovered,
+            signer_addr,
+            verifying_contract,
+            neg_risk,
+            POLYGON_CHAIN_ID,
+        ));
+    }
+    debug!(
+        "EIP-712 sign OK: signer={:?} contract={:?} neg_risk={} hash=0x{}",
+        signer_addr,
+        verifying_contract,
+        neg_risk,
+        hex::encode(signing_hash)
+    );
 
     // alloy returns recovery id v = 0 or 1 in the last byte of `as_bytes()`.
     // Polymarket's CTF Exchange contract calls ecrecover which expects

@@ -163,6 +163,17 @@ impl ExecutionEngine {
         //   uint256 fields → decimal strings (JS can't hold uint256 as a number)
         //   uint8 fields   → JSON integers (side, signatureType)
         //   address fields → lowercase hex strings
+        info!(
+            "place_order: side={} neg_risk={} token_id={} maker_amount={} taker_amount={} fee_bps={} sig_type={}",
+            if side_u8 == 0 { "BUY" } else { "SELL" },
+            req.neg_risk,
+            req.token_id,
+            maker_amount,
+            taker_amount,
+            req.fee_rate_bps,
+            sig_type,
+        );
+
         let side_str = if side_u8 == 0 { "BUY" } else { "SELL" };
         let body = json!({
             "order": {
@@ -186,6 +197,7 @@ impl ExecutionEngine {
         });
 
         let body_str = body.to_string();
+        debug!("POST /order body: {}", body_str);
         let headers = self.auth_headers_with_address("POST", "/order", &body_str, order_maker)?;
         let path = format!("{}/order", self.config.polymarket.clob_api_url);
 
