@@ -134,10 +134,10 @@ async fn build_l1_headers(
     let sig_hex = format!("0x{}", hex::encode(adjusted));
 
     Ok(vec![
-        ("POLY_ADDRESS".into(), poly_address),
-        ("POLY_SIGNATURE".into(), sig_hex),
-        ("POLY_TIMESTAMP".into(), timestamp),
-        ("POLY_NONCE".into(), nonce.to_string()),
+        ("POLY-ADDRESS".into(), poly_address),
+        ("POLY-SIGNATURE".into(), sig_hex),
+        ("POLY-TIMESTAMP".into(), timestamp),
+        ("POLY-NONCE".into(), nonce.to_string()),
     ])
 }
 
