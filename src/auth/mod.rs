@@ -26,13 +26,13 @@
 
 use anyhow::{bail, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use alloy::{
-    primitives::{Address, U256},
+    primitives::U256,
     signers::{local::PrivateKeySigner, Signer},
     sol,
     sol_types::eip712_domain,
@@ -71,13 +71,6 @@ pub struct ApiKeyResponse {
     pub api_key: String,
     pub secret: String,
     pub passphrase: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiKeysListResponse {
-    // GET /auth/api-keys returns an array at the root or in a "keys" field
-    #[serde(default)]
-    pub results: Vec<serde_json::Value>,
 }
 
 // ── L1 header builder ────────────────────────────────────────────────────────

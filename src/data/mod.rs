@@ -57,6 +57,10 @@ pub async fn run_btc_price_feed(
                             }
                             Ok(Message::Close(_)) => {
                                 warn!("Binance WS closed by server");
+                                // Server-initiated close counts as a failure:
+                                // if the server keeps closing (e.g. Binance is down)
+                                // we must eventually fall over to the Coinbase fallback.
+                                clean_exit = false;
                                 break;
                             }
                             Err(e) => {
@@ -85,8 +89,7 @@ pub async fn run_btc_price_feed(
                 }
             }
 
-            let backoff = if consecutive_failures == 0 { 3 } else { 3 };
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
         } else {
             // ── Coinbase REST fallback ───────────────────────────────────────
             warn!(
