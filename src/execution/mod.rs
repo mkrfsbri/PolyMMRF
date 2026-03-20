@@ -187,13 +187,13 @@ impl ExecutionEngine {
                 "expiration": "0",
                 "nonce": "0",
                 "feeRateBps": "0",
-                "side": side_u8,
+                "side": side_str,
                 "signatureType": sig_type,
                 "signature": signature,
             },
             "owner": self.credentials.api_key,
             "orderType": "GTC",
-            "postOnly": false,
+            "postOnly": self.config.strategy.post_only,
         });
 
         let body_str = body.to_string();
