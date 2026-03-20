@@ -144,7 +144,7 @@ impl ExecutionEngine {
             maker_amount,
             taker_amount,
             side_u8,
-            req.fee_rate_bps,
+            0u32, // feeRateBps=0 for GTC maker orders; takerBaseFee is the CLOB's taker charge
             sig_type,
             req.neg_risk,
         )
@@ -164,7 +164,7 @@ impl ExecutionEngine {
         //   uint8 fields   → JSON integers (side, signatureType)
         //   address fields → lowercase hex strings
         info!(
-            "place_order: side={} neg_risk={} token_id={} maker_amount={} taker_amount={} fee_bps={} sig_type={}",
+            "place_order: side={} neg_risk={} token_id={} maker_amount={} taker_amount={} market_fee_bps={} sig_type={}",
             if side_u8 == 0 { "BUY" } else { "SELL" },
             req.neg_risk,
             req.token_id,
@@ -177,7 +177,7 @@ impl ExecutionEngine {
         let side_str = if side_u8 == 0 { "BUY" } else { "SELL" };
         let body = json!({
             "order": {
-                "salt": salt,
+                "salt": salt,  // u64 → JSON integer (py-clob-client sends salt as number)
                 "maker": order_maker,
                 "signer": signer_addr,
                 "taker": "0x0000000000000000000000000000000000000000",
@@ -186,14 +186,14 @@ impl ExecutionEngine {
                 "takerAmount": taker_amount.to_string(),
                 "expiration": "0",
                 "nonce": "0",
-                "feeRateBps": req.fee_rate_bps.to_string(),
+                "feeRateBps": "0",
                 "side": side_str,
                 "signatureType": sig_type,
                 "signature": signature,
             },
             "owner": self.credentials.api_key,
             "orderType": "GTC",
-            "postOnly": false,
+            "postOnly": self.config.strategy.post_only,
         });
 
         let body_str = body.to_string();
