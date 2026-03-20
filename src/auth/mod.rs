@@ -93,8 +93,8 @@ async fn build_l1_headers(
     let signer_address = format!("{:?}", local_signer.address());
 
     // POLY_ADDRESS in L1 auth determines which account the derived API key is
-    // associated with, and must match the POLY-ADDRESS sent in subsequent L2 calls.
-    // L1 headers use underscores; L2 headers use dashes — different conventions.
+    // associated with, and must match the POLY_ADDRESS sent in subsequent L2 calls.
+    // Both L1 and L2 use underscores — Polymarket's API consistently uses underscore headers.
     //   EOA (0)         → POLY_ADDRESS = signer EOA (signs for itself)
     //   PROXY/Safe (>0) → POLY_ADDRESS = proxy/safe wallet (funder_address);
     //                     the server recovers the signer and checks authorization
@@ -176,7 +176,7 @@ async fn is_credential_valid(
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    // POLY-ADDRESS is required by Polymarket's L2 auth; without it the server
+    // POLY_ADDRESS is required by Polymarket's L2 auth; without it the server
     // returns 401 even with a valid API key, causing spurious credential regen.
     req = req.header("POLY_ADDRESS", creds.address.as_str());
 
@@ -463,9 +463,14 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
                         "\n  sig_type        : 0 (EOA)\n  \
                          Signer / account: {}\n  \
                          \n  \
-                         Polymarket rejected the EOA — it may not have an account yet.\n  \
-                         Paste keys from polymarket.com/profile → API Keys and add\n  \
-                         POLY_SKIP_L1_AUTH=true, or create an account via the web app first.",
+                         Polymarket rejected the EOA — two likely causes:\n  \
+                         A) POLY_SIGNATURE_TYPE=0 is set in your environment but your\n  \
+                            account is a Magic Link / proxy wallet (most common).\n  \
+                            Fix: unset POLY_SIGNATURE_TYPE (or set to 1) and set\n  \
+                            POLY_FUNDER_ADDRESS to your proxy wallet address.\n  \
+                         B) The EOA has no Polymarket account yet.\n  \
+                            Fix: register at polymarket.com, paste API keys into .env,\n  \
+                            then add POLY_SKIP_L1_AUTH=true.",
                         signer_addr_display
                     )
                 }

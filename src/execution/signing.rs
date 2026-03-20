@@ -87,8 +87,6 @@ pub async fn sign_clob_order(
     let signer_addr = local_signer.address();
 
     // For EOA (sig_type 0) the CTF Exchange contract requires maker == signer.
-    // The EIP-712 struct hash must use the same address that appears in the JSON
-    // request body, otherwise the server's signature reconstruction fails.
     // For POLY_PROXY / GnosisSafe (sig_type 1/2): maker = proxy/safe wallet.
     let maker: Address = if sig_type == 0 {
         signer_addr
@@ -97,6 +95,14 @@ pub async fn sign_clob_order(
             anyhow::anyhow!("Invalid POLY_FUNDER_ADDRESS: '{}'", maker_address)
         })?
     };
+
+    // For POLY_PROXY / GnosisSafe (sig_type 1/2): the `signer` field in the EIP-712
+    // struct must be the proxy/safe address (same as maker), NOT the EOA.
+    // The CTF Exchange contract verifies the signature via isValidSignature() on that
+    // contract, which internally checks the EOA signature. The API key is also
+    // registered under the proxy address, so signer must match it.
+    // For EOA (sig_type 0): signer == maker == the EOA address.
+    let order_signer = maker;
 
     let token_id_u256: U256 = token_id.parse().map_err(|_| {
         anyhow::anyhow!("Invalid token_id (expected decimal integer): '{}'", token_id)
@@ -110,7 +116,7 @@ pub async fn sign_clob_order(
     let order = Order {
         salt,
         maker,
-        signer: signer_addr,
+        signer: order_signer,
         taker: Address::ZERO,
         tokenId: token_id_u256,
         makerAmount: U256::from(maker_amount),
@@ -184,7 +190,9 @@ pub async fn sign_clob_order(
     }
 
     let sig_hex = format!("0x{}", hex::encode(adjusted));
-    let signer_hex = format!("{:?}", signer_addr);
+    // Return order_signer (proxy wallet for sig_type != 0, EOA for sig_type 0)
+    // This is the address that goes into both the EIP-712 struct and the JSON "signer" field.
+    let signer_hex = format!("{:?}", order_signer);
 
     Ok((sig_hex, signer_hex, salt_u64))
 }

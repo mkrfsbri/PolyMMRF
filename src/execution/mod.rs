@@ -28,7 +28,7 @@ impl ExecutionEngine {
         let simulation = config.bot.simulation;
         let mut credentials = ClobCredentials::from_env()?;
 
-        // For EOA (sig_type 0) the POLY-ADDRESS header must be the signing EOA,
+        // For EOA (sig_type 0) the POLY_ADDRESS header must be the signing EOA,
         // not POLY_FUNDER_ADDRESS (which may still hold an old proxy address).
         // Derive it from the private key and override credentials.address so that
         // ALL L2 auth calls (place_order, cancel_order, validation) use the right
@@ -151,8 +151,9 @@ impl ExecutionEngine {
         .await
         .map_err(|e| anyhow::anyhow!("Order signing failed: {}", e))?;
 
-        // For EOA (sig_type 0) the contract requires maker == signer (same address).
-        // For POLY_PROXY (sig_type 1) maker = proxy wallet, signer = controlling EOA.
+        // For EOA (sig_type 0): maker == signer == EOA address.
+        // For POLY_PROXY (sig_type 1): maker == signer == proxy wallet (funder_address).
+        //   sign_clob_order returns the proxy wallet as signer_addr for sig_type != 0.
         let order_maker = if sig_type == 0 {
             signer_addr.as_str()
         } else {
@@ -215,7 +216,15 @@ impl ExecutionEngine {
                     "POST /order → 401 Unauthorized\n  \
                      Polymarket response: {}\n  \
                      maker={} signer={} sig_type={}\n  \
-                     Check POLY_API_KEY/SECRET/PASSPHRASE match the account for this signer.",
+                     \n  \
+                     Common causes:\n  \
+                     1. POLY_SIGNATURE_TYPE env var overrides config.toml — if set to 0\n  \
+                        but your account is a proxy wallet (Magic Link), unset it or use 1.\n  \
+                     2. POLY_API_KEY/SECRET/PASSPHRASE belong to a different address.\n  \
+                        The API key must be registered for the signer address shown above.\n  \
+                     3. No credentials — add them to .env or let the bot auto-derive them\n  \
+                        by ensuring POLY_PRIVATE_KEY (and POLY_FUNDER_ADDRESS for sig_type=1)\n  \
+                        are set correctly.",
                     raw_body, order_maker, signer_addr, sig_type
                 ),
                 reqwest::StatusCode::FORBIDDEN => warn!(
