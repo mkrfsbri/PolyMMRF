@@ -135,7 +135,7 @@ pub async fn sign_clob_order(
     };
 
     let domain = eip712_domain! {
-        name: "CTF Exchange",
+        name: "Polymarket CTF Exchange",
         version: "1",
         chain_id: POLYGON_CHAIN_ID,
         verifying_contract: verifying_contract,
