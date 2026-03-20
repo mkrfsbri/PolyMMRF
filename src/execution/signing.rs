@@ -76,7 +76,7 @@ pub async fn sign_clob_order(
     fee_rate_bps: u32,
     sig_type: u8,
     neg_risk: bool,
-) -> Result<(String, String, String)> {
+) -> Result<(String, String, u64)> {
     let local_signer: PrivateKeySigner = private_key
         .parse()
         .map_err(|_| anyhow::anyhow!(
@@ -102,10 +102,9 @@ pub async fn sign_clob_order(
         anyhow::anyhow!("Invalid token_id (expected decimal integer): '{}'", token_id)
     })?;
 
-    // Salt: lower 64-bits of nanosecond timestamp — unique per call
-    let salt_u64 = chrono::Utc::now()
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis()) as u64;
+    // Salt: millisecond timestamp — unique per call and within JS MAX_SAFE_INTEGER
+    // (nanoseconds ~1.7e18 exceed 2^53 ≈ 9e15 and lose precision in JSON numbers)
+    let salt_u64 = chrono::Utc::now().timestamp_millis() as u64;
     let salt = U256::from(salt_u64);
 
     let order = Order {
@@ -187,7 +186,7 @@ pub async fn sign_clob_order(
     let sig_hex = format!("0x{}", hex::encode(adjusted));
     let signer_hex = format!("{:?}", signer_addr);
 
-    Ok((sig_hex, signer_hex, salt.to_string()))
+    Ok((sig_hex, signer_hex, salt_u64))
 }
 
 // ── Credentials ───────────────────────────────────────────────────────────────

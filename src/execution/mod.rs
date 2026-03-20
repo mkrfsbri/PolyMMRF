@@ -177,7 +177,7 @@ impl ExecutionEngine {
         let side_str = if side_u8 == 0 { "BUY" } else { "SELL" };
         let body = json!({
             "order": {
-                "salt": salt,
+                "salt": salt,  // u64 → JSON integer (py-clob-client sends salt as number)
                 "maker": order_maker,
                 "signer": signer_addr,
                 "taker": "0x0000000000000000000000000000000000000000",
