@@ -28,7 +28,7 @@ impl ExecutionEngine {
         let simulation = config.bot.simulation;
         let mut credentials = ClobCredentials::from_env()?;
 
-        // For EOA (sig_type 0) the POLY-ADDRESS header must be the signing EOA,
+        // For EOA (sig_type 0) the POLY_ADDRESS header must be the signing EOA,
         // not POLY_FUNDER_ADDRESS (which may still hold an old proxy address).
         // Derive it from the private key and override credentials.address so that
         // ALL L2 auth calls (place_order, cancel_order, validation) use the right

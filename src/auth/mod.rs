@@ -93,8 +93,8 @@ async fn build_l1_headers(
     let signer_address = format!("{:?}", local_signer.address());
 
     // POLY_ADDRESS in L1 auth determines which account the derived API key is
-    // associated with, and must match the POLY-ADDRESS sent in subsequent L2 calls.
-    // L1 headers use underscores; L2 headers use dashes — different conventions.
+    // associated with, and must match the POLY_ADDRESS sent in subsequent L2 calls.
+    // Both L1 and L2 use underscores — Polymarket's API consistently uses underscore headers.
     //   EOA (0)         → POLY_ADDRESS = signer EOA (signs for itself)
     //   PROXY/Safe (>0) → POLY_ADDRESS = proxy/safe wallet (funder_address);
     //                     the server recovers the signer and checks authorization
@@ -176,7 +176,7 @@ async fn is_credential_valid(
     for (k, v) in &headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    // POLY-ADDRESS is required by Polymarket's L2 auth; without it the server
+    // POLY_ADDRESS is required by Polymarket's L2 auth; without it the server
     // returns 401 even with a valid API key, causing spurious credential regen.
     req = req.header("POLY_ADDRESS", creds.address.as_str());
 
