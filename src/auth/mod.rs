@@ -463,9 +463,14 @@ pub async fn ensure_valid_credentials(config: &BotConfig, env_path: &str) {
                         "\n  sig_type        : 0 (EOA)\n  \
                          Signer / account: {}\n  \
                          \n  \
-                         Polymarket rejected the EOA — it may not have an account yet.\n  \
-                         Paste keys from polymarket.com/profile → API Keys and add\n  \
-                         POLY_SKIP_L1_AUTH=true, or create an account via the web app first.",
+                         Polymarket rejected the EOA — two likely causes:\n  \
+                         A) POLY_SIGNATURE_TYPE=0 is set in your environment but your\n  \
+                            account is a Magic Link / proxy wallet (most common).\n  \
+                            Fix: unset POLY_SIGNATURE_TYPE (or set to 1) and set\n  \
+                            POLY_FUNDER_ADDRESS to your proxy wallet address.\n  \
+                         B) The EOA has no Polymarket account yet.\n  \
+                            Fix: register at polymarket.com, paste API keys into .env,\n  \
+                            then add POLY_SKIP_L1_AUTH=true.",
                         signer_addr_display
                     )
                 }
