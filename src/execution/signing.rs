@@ -248,7 +248,7 @@ pub fn build_hmac_signature(
     mac.update(message.as_bytes());
     let result = mac.finalize().into_bytes();
 
-    Ok(URL_SAFE_NO_PAD.encode(result))
+    Ok(URL_SAFE.encode(result))
 }
 
 /// Build L2 auth headers for a CLOB API request.
