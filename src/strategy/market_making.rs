@@ -20,7 +20,10 @@ pub struct QuotePair {
     pub up_ask: Decimal,
     pub down_bid: Decimal,
     pub down_ask: Decimal,
-    pub size: Decimal,
+    /// Order size for the UP side.  Zero means the risk gate has blocked UP orders.
+    pub up_size: Decimal,
+    /// Order size for the DOWN side.  Zero means the risk gate has blocked DOWN orders.
+    pub down_size: Decimal,
 }
 
 // ── Strategy ──────────────────────────────────────────────────────────────────
@@ -283,7 +286,7 @@ impl MarketMakingStrategy {
         let max_half =
             Decimal::try_from(self.config.strategy.max_spread / 2.0).unwrap_or(dec!(0.05));
 
-        // Time-decay adaptive spread
+        // Time-decay adaptive spread: narrows as market approaches settlement.
         let total_duration = market.actual_duration_secs();
         let remaining = market.seconds_remaining();
         let time_factor = if total_duration > 0 {
@@ -291,7 +294,12 @@ impl MarketMakingStrategy {
         } else {
             dec!(0.5)
         };
-        let adaptive = half_spread * (dec!(0.5) + time_factor * dec!(0.5));
+        let time_adaptive = half_spread * (dec!(0.5) + time_factor * dec!(0.5));
+
+        // Volatility-adaptive spread: widens during high-volatility regimes to
+        // reduce adverse selection, tightens when BTC is calm to attract more fills.
+        let vol_multiplier = self.state.vol_tracker.spread_multiplier();
+        let adaptive = time_adaptive * vol_multiplier;
         let clamped_half = adaptive.max(min_half).min(max_half);
 
         // Per-worker inventory skew (isolated from other market workers)
@@ -313,14 +321,21 @@ impl MarketMakingStrategy {
             .max(dec!(0.01))
             .min(dec!(0.99));
 
-        // Size from risk engine or fallback to config
+        // Per-side size from risk engine.  Zero when the inventory gate blocks a side.
         let order_size =
             Decimal::try_from(self.config.strategy.order_size).unwrap_or(dec!(10));
-        let sizing = self.risk.calculate_size(dec!(0.05), dec!(1.0), Outcome::Up);
-        let size = if sizing.allowed {
-            sizing.size.min(order_size)
+        let up_sizing = self.risk.calculate_size(dec!(0.05), dec!(1.0), Outcome::Up);
+        let down_sizing = self.risk.calculate_size(dec!(0.05), dec!(1.0), Outcome::Down);
+
+        let up_size = if up_sizing.allowed {
+            up_sizing.size.min(order_size)
         } else {
-            order_size
+            Decimal::ZERO // inventory gate blocked UP — skip UP order
+        };
+        let down_size = if down_sizing.allowed {
+            down_sizing.size.min(order_size)
+        } else {
+            Decimal::ZERO // inventory gate blocked DOWN — skip DOWN order
         };
 
         // Round to tick (0.01)
@@ -332,7 +347,8 @@ impl MarketMakingStrategy {
             up_ask: round_to_tick(up_ask),
             down_bid: round_to_tick(down_bid),
             down_ask: round_to_tick(down_ask),
-            size,
+            up_size,
+            down_size,
         }
     }
 
@@ -345,13 +361,16 @@ impl MarketMakingStrategy {
         }
         let ratio = self.local_inv_up / total;
         let deviation = ratio - dec!(0.5);
+        // Use configured threshold (default 0.1 = apply skew when >10% deviation from 50/50)
         let threshold =
-            Decimal::try_from(self.config.risk.max_inventory_ratio - 0.5).unwrap_or(dec!(0.25));
-        if deviation.abs() <= threshold / dec!(2) {
+            Decimal::try_from(self.config.strategy.inventory_skew_threshold).unwrap_or(dec!(0.1));
+        if deviation.abs() <= threshold {
             return (dec!(0), dec!(0));
         }
-        // 2 cents skew per 10% deviation
-        let skew = deviation * dec!(0.02);
+        // Use configured skew amount per unit deviation (default 0.02 = 2 cents per 100% deviation)
+        let skew_amount =
+            Decimal::try_from(self.config.strategy.inventory_skew_amount).unwrap_or(dec!(0.02));
+        let skew = deviation * skew_amount;
         (skew, -skew)
     }
 
@@ -376,41 +395,53 @@ impl MarketMakingStrategy {
 
         let quotes = self.calculate_quotes(market);
         info!(
-            "[{}] Initial quotes: UP bid={} DOWN bid={} size={}",
-            self.market_type_str, quotes.up_bid, quotes.down_bid, quotes.size
+            "[{}] Initial quotes: UP bid={} size={} | DOWN bid={} size={}",
+            self.market_type_str,
+            quotes.up_bid,
+            quotes.up_size,
+            quotes.down_bid,
+            quotes.down_size,
         );
 
-        // Place UP BUY limit
-        let up_resp = self
-            .execution
-            .place_order(OrderRequest {
-                token_id: market.token_id_up.clone(),
-                side: Side::Buy,
-                price: quotes.up_bid,
-                size: quotes.size,
-                outcome: Outcome::Up,
-                fee_rate_bps: market.fee_rate_bps,
-                post_only: self.config.strategy.post_only,
-                neg_risk: market.neg_risk,
-            })
-            .await?;
-        self.up_order_ids.push(up_resp.order_id);
+        // Place UP BUY limit (skip if risk gate blocked this side)
+        if quotes.up_size.is_zero() {
+            warn!("[{}] UP order skipped: risk gate blocked (inventory imbalance)", self.market_type_str);
+        } else {
+            let up_resp = self
+                .execution
+                .place_order(OrderRequest {
+                    token_id: market.token_id_up.clone(),
+                    side: Side::Buy,
+                    price: quotes.up_bid,
+                    size: quotes.up_size,
+                    outcome: Outcome::Up,
+                    fee_rate_bps: market.fee_rate_bps,
+                    post_only: self.config.strategy.post_only,
+                    neg_risk: market.neg_risk,
+                })
+                .await?;
+            self.up_order_ids.push(up_resp.order_id);
+        }
 
-        // Place DOWN BUY limit
-        let down_resp = self
-            .execution
-            .place_order(OrderRequest {
-                token_id: market.token_id_down.clone(),
-                side: Side::Buy,
-                price: quotes.down_bid,
-                size: quotes.size,
-                outcome: Outcome::Down,
-                fee_rate_bps: market.fee_rate_bps,
-                post_only: self.config.strategy.post_only,
-                neg_risk: market.neg_risk,
-            })
-            .await?;
-        self.down_order_ids.push(down_resp.order_id);
+        // Place DOWN BUY limit (skip if risk gate blocked this side)
+        if quotes.down_size.is_zero() {
+            warn!("[{}] DOWN order skipped: risk gate blocked (inventory imbalance)", self.market_type_str);
+        } else {
+            let down_resp = self
+                .execution
+                .place_order(OrderRequest {
+                    token_id: market.token_id_down.clone(),
+                    side: Side::Buy,
+                    price: quotes.down_bid,
+                    size: quotes.down_size,
+                    outcome: Outcome::Down,
+                    fee_rate_bps: market.fee_rate_bps,
+                    post_only: self.config.strategy.post_only,
+                    neg_risk: market.neg_risk,
+                })
+                .await?;
+            self.down_order_ids.push(down_resp.order_id);
+        }
 
         self.last_quotes = Some(quotes);
         Ok(())
@@ -445,9 +476,12 @@ impl MarketMakingStrategy {
             self.market_type_str, winning_outcome, self.local_inv_up, self.local_inv_down
         );
 
+        // Derive cost basis from configured target bid price (not hard-coded 0.45).
+        let cost_basis =
+            Decimal::try_from(self.config.strategy.target_bid_price).unwrap_or(dec!(0.45));
+
         if let Some(ref mut sim) = self.sim_fills {
             // In sim mode, calculate PnL from local (per-worker) inventory
-            let cost_basis = dec!(0.45);
             let pnl = match winning_outcome {
                 Outcome::Up => {
                     self.local_inv_up * (dec!(1) - cost_basis) - self.local_inv_down * cost_basis
@@ -461,13 +495,12 @@ impl MarketMakingStrategy {
             info!("[SIM][{}] Settlement PnL: ${:.4}", self.market_type_str, pnl);
         } else {
             // Live settlement PnL estimation from local inventory
-            let cost = dec!(0.45);
             let pnl = match winning_outcome {
                 Outcome::Up => {
-                    self.local_inv_up * (dec!(1) - cost) - self.local_inv_down * cost
+                    self.local_inv_up * (dec!(1) - cost_basis) - self.local_inv_down * cost_basis
                 }
                 Outcome::Down => {
-                    self.local_inv_down * (dec!(1) - cost) - self.local_inv_up * cost
+                    self.local_inv_down * (dec!(1) - cost_basis) - self.local_inv_up * cost_basis
                 }
             };
             self.risk.record_trade_result(pnl);

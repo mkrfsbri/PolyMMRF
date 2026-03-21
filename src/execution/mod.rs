@@ -15,6 +15,51 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+// ── Retry helper ──────────────────────────────────────────────────────────────
+
+/// Retry `f` up to `max_attempts` times with exponential back-off starting at
+/// `base_delay`.  Only transient errors (network timeouts, 5xx, etc.) are
+/// retried; 4xx client errors are returned immediately.
+async fn with_retry<F, Fut, T>(
+    label: &str,
+    max_attempts: u32,
+    base_delay: Duration,
+    mut f: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0;
+    loop {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                attempt += 1;
+                // Don't retry client (4xx) errors — they won't fix themselves.
+                let is_client_err = e
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(|re| re.status())
+                    .map(|s| s.is_client_error())
+                    .unwrap_or(false);
+                if is_client_err || attempt >= max_attempts {
+                    return Err(e);
+                }
+                let delay = base_delay * 2_u32.pow(attempt - 1);
+                warn!(
+                    "{}: attempt {}/{} failed ({}), retrying in {}ms…",
+                    label,
+                    attempt,
+                    max_attempts,
+                    e,
+                    delay.as_millis()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 pub struct ExecutionEngine {
     config: BotConfig,
     client: Client,
@@ -202,43 +247,61 @@ impl ExecutionEngine {
         let headers = self.auth_headers_with_address("POST", "/order", &body_str, order_maker)?;
         let path = format!("{}/order", self.config.polymarket.clob_api_url);
 
-        let mut request = self.client.post(&path).json(&body);
-        for (k, v) in &headers {
-            request = request.header(k.as_str(), v.as_str());
-        }
-
-        let http_resp = request.send().await?;
-        let status = http_resp.status();
-        if !status.is_success() {
-            let raw_body = http_resp.text().await.unwrap_or_default();
-            match status {
-                reqwest::StatusCode::UNAUTHORIZED => warn!(
-                    "POST /order → 401 Unauthorized\n  \
-                     Polymarket response: {}\n  \
-                     maker={} signer={} sig_type={}\n  \
-                     \n  \
-                     Common causes:\n  \
-                     1. POLY_SIGNATURE_TYPE env var overrides config.toml — if set to 0\n  \
-                        but your account is a proxy wallet (Magic Link), unset it or use 1.\n  \
-                     2. POLY_API_KEY/SECRET/PASSPHRASE belong to a different address.\n  \
-                        The API key must be registered for the signer address shown above.\n  \
-                     3. No credentials — add them to .env or let the bot auto-derive them\n  \
-                        by ensuring POLY_PRIVATE_KEY (and POLY_FUNDER_ADDRESS for sig_type=1)\n  \
-                        are set correctly.",
-                    raw_body, order_maker, signer_addr, sig_type
-                ),
-                reqwest::StatusCode::FORBIDDEN => warn!(
-                    "POST /order → 403 Forbidden\n  \
-                     Polymarket response: {}\n  \
-                     Ensure POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE are set.",
-                    raw_body
-                ),
-                _ => warn!("POST /order → HTTP {}: {}", status, raw_body),
+        // Retry the HTTP send up to 3 times with exponential back-off (2s, 4s)
+        // for transient network / 5xx failures.  4xx client errors are not retried.
+        let order_maker_owned = order_maker.to_string();
+        let v: serde_json::Value = with_retry("POST /order", 3, Duration::from_secs(2), || {
+            let client = &self.client;
+            let path = &path;
+            let body = &body;
+            let headers = &headers;
+            let order_maker_owned = &order_maker_owned;
+            let signer_addr = &signer_addr;
+            async move {
+                let mut request = client.post(path.as_str()).json(body);
+                for (k, v) in headers.iter() {
+                    request = request.header(k.as_str(), v.as_str());
+                }
+                let http_resp = request.send().await?;
+                let status = http_resp.status();
+                if !status.is_success() {
+                    let raw_body = http_resp.text().await.unwrap_or_default();
+                    match status {
+                        reqwest::StatusCode::UNAUTHORIZED => warn!(
+                            "POST /order → 401 Unauthorized\n  \
+                             Polymarket response: {}\n  \
+                             maker={} signer={} sig_type={}\n  \
+                             \n  \
+                             Common causes:\n  \
+                             1. POLY_SIGNATURE_TYPE env var overrides config.toml — if set to 0\n  \
+                                but your account is a proxy wallet (Magic Link), unset it or use 1.\n  \
+                             2. POLY_API_KEY/SECRET/PASSPHRASE belong to a different address.\n  \
+                                The API key must be registered for the signer address shown above.\n  \
+                             3. No credentials — add them to .env or let the bot auto-derive them\n  \
+                                by ensuring POLY_PRIVATE_KEY (and POLY_FUNDER_ADDRESS for sig_type=1)\n  \
+                                are set correctly.",
+                            raw_body, order_maker_owned, signer_addr, sig_type
+                        ),
+                        reqwest::StatusCode::FORBIDDEN => warn!(
+                            "POST /order → 403 Forbidden\n  \
+                             Polymarket response: {}\n  \
+                             Ensure POLY_API_KEY, POLY_API_SECRET, POLY_API_PASSPHRASE are set.",
+                            raw_body
+                        ),
+                        _ => warn!("POST /order → HTTP {}: {}", status, raw_body),
+                    }
+                    bail!(
+                        "HTTP status client error ({} {}) for url ({})",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or(""),
+                        path
+                    );
+                }
+                let v: serde_json::Value = http_resp.json().await?;
+                Ok(v)
             }
-            bail!("HTTP status client error ({} {}) for url ({})", status.as_u16(), status.canonical_reason().unwrap_or(""), format!("{}/order", self.config.polymarket.clob_api_url));
-        }
-        let resp = http_resp;
-        let v: serde_json::Value = resp.json().await?;
+        })
+        .await?;
 
         let order_id = v["orderID"]
             .as_str()

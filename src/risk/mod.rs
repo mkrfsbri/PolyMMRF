@@ -161,22 +161,23 @@ impl RiskEngine {
         SizingResult::allow(rounded)
     }
 
-    /// Inventory skew adjustments to widen/tighten quotes.
+    /// Inventory skew adjustments to widen/tighten quotes (global inventory).
     /// Returns (up_adjustment, down_adjustment) in price units.
+    /// Note: the per-worker strategy uses `local_inventory_skew()` instead.
     pub fn inventory_skew_adjustment(&self) -> (Decimal, Decimal) {
         let ratio = self.state.inventory_ratio();
         let deviation = ratio - dec!(0.5);
+        // Use max_inventory_ratio to derive threshold (midpoint between 50% and max)
         let threshold =
             Decimal::try_from(self.config.max_inventory_ratio - 0.5).unwrap_or(dec!(0.25));
 
-        // Within threshold: no skew
+        // Within half the threshold zone: no skew
         if deviation.abs() <= threshold / dec!(2) {
             return (dec!(0), dec!(0));
         }
 
-        // 2 cents skew per 10% deviation
+        // Scale skew by deviation (larger imbalance → larger skew)
         let skew = deviation * dec!(0.02);
-        // Positive UP ratio → UP is expensive (raise ask), DOWN is cheap (lower ask)
         (skew, -skew)
     }
 

@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-// parking_lot::RwLock no longer needed (current_markets uses DashMap)
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 
@@ -215,6 +215,78 @@ pub enum DataEvent {
     },
 }
 
+// ── Volatility Tracker ────────────────────────────────────────────────────────
+
+/// Tracks a rolling window of BTC prices and computes the std-dev of
+/// log-returns, used to scale the market-making spread dynamically.
+///
+/// * Low volatility  → spread_multiplier < 1.0  (tighter spread → more fills)
+/// * Normal          → spread_multiplier ≈ 1.0
+/// * High volatility → spread_multiplier > 1.0  (wider spread → less adverse selection)
+pub struct VolatilityTracker {
+    prices: Mutex<VecDeque<f64>>,
+    window: usize,
+}
+
+impl VolatilityTracker {
+    /// Create a new tracker with the given rolling-window size (number of price samples).
+    pub fn new(window: usize) -> Self {
+        Self {
+            prices: Mutex::new(VecDeque::with_capacity(window + 1)),
+            window,
+        }
+    }
+
+    /// Push a new BTC price sample into the rolling window.
+    pub fn update(&self, price: Decimal) {
+        let p = price.to_f64().unwrap_or(0.0);
+        if p <= 0.0 {
+            return;
+        }
+        let mut prices = self.prices.lock().unwrap();
+        prices.push_back(p);
+        if prices.len() > self.window {
+            prices.pop_front();
+        }
+    }
+
+    /// Rolling standard deviation of log-returns.  Returns 0.0 if there are
+    /// fewer than 2 price samples (insufficient data).
+    pub fn rolling_stddev(&self) -> f64 {
+        let prices = self.prices.lock().unwrap();
+        if prices.len() < 2 {
+            return 0.0;
+        }
+        let returns: Vec<f64> = prices
+            .iter()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] / w[0]).ln())
+            .collect();
+        let n = returns.len() as f64;
+        let mean = returns.iter().sum::<f64>() / n;
+        let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+        variance.sqrt()
+    }
+
+    /// Returns a spread multiplier in [0.5, 3.0].
+    ///
+    /// Calibrated so that a per-sample log-return stddev of 0.1% (typical quiet
+    /// BTC 5-second interval) maps to 1.0×.  The factor widens the spread during
+    /// high-volatility regimes and tightens it when the market is calm.
+    pub fn spread_multiplier(&self) -> Decimal {
+        let stddev = self.rolling_stddev();
+        if stddev < 1e-8 {
+            // Insufficient data or market perfectly still → neutral
+            return Decimal::ONE;
+        }
+        // Base reference: 0.1% per tick is "normal"
+        let base = 0.001_f64;
+        let ratio = (stddev / base).max(0.5).min(3.0);
+        Decimal::try_from(ratio).unwrap_or(Decimal::ONE)
+    }
+}
+
 // ── Bot State ─────────────────────────────────────────────────────────────────
 
 pub struct BotState {
@@ -239,6 +311,8 @@ pub struct BotState {
     /// Current active markets keyed by market-type string ("5m", "15m", "generic").
     /// Each market worker inserts/removes its entry independently.
     pub current_markets: DashMap<String, Market>,
+    /// Rolling volatility tracker for adaptive spread calculation.
+    pub vol_tracker: VolatilityTracker,
 }
 
 impl BotState {
@@ -254,6 +328,8 @@ impl BotState {
             active_orders: DashMap::new(),
             order_books: DashMap::new(),
             current_markets: DashMap::new(),
+            // 20-sample window ≈ 100s of data at 5s Binance tick rate
+            vol_tracker: VolatilityTracker::new(20),
         })
     }
 
@@ -357,6 +433,63 @@ impl BotState {
     pub fn reset_inventory(&self) {
         self.inventory_up.store(0, Ordering::Relaxed);
         self.inventory_down.store(0, Ordering::Relaxed);
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn test_vol_tracker_insufficient_data() {
+        let tracker = VolatilityTracker::new(20);
+        // No data → neutral multiplier
+        assert_eq!(tracker.spread_multiplier(), Decimal::ONE);
+        // One sample → still neutral
+        tracker.update(dec!(65000));
+        assert_eq!(tracker.spread_multiplier(), Decimal::ONE);
+    }
+
+    #[test]
+    fn test_vol_tracker_stable_price() {
+        let tracker = VolatilityTracker::new(20);
+        // Feed 10 identical prices → zero std dev → falls back to neutral (1.0)
+        // Zero stddev is indistinguishable from insufficient data, so we return 1.0
+        // rather than 0.5 to avoid unintentional spread tightening.
+        for _ in 0..10 {
+            tracker.update(dec!(65000));
+        }
+        let m = tracker.spread_multiplier();
+        assert_eq!(m, Decimal::ONE, "zero stddev should produce neutral multiplier, got {}", m);
+    }
+
+    #[test]
+    fn test_vol_tracker_volatile_price() {
+        let tracker = VolatilityTracker::new(20);
+        // Alternating prices simulate high volatility
+        for i in 0..10 {
+            let p = if i % 2 == 0 { dec!(65000) } else { dec!(64000) };
+            tracker.update(p);
+        }
+        let m = tracker.spread_multiplier();
+        // Large swings → multiplier well above 1.0
+        assert!(m > dec!(1.5), "volatile market should produce high multiplier, got {}", m);
+    }
+
+    #[test]
+    fn test_vol_tracker_window_eviction() {
+        let tracker = VolatilityTracker::new(5);
+        // Fill 5 identical prices first
+        for _ in 0..5 {
+            tracker.update(dec!(65000));
+        }
+        // Now add one volatile sample — window evicts oldest stable price
+        tracker.update(dec!(66000));
+        // Stddev should now be non-zero
+        assert!(tracker.rolling_stddev() > 0.0);
     }
 }
 

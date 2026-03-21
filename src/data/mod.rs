@@ -48,6 +48,7 @@ pub async fn run_btc_price_feed(
                             Ok(Message::Text(text)) => {
                                 if let Some(price) = parse_binance_ticker(&text) {
                                     debug!("BTC/Binance: ${}", price.price);
+                                    state.vol_tracker.update(price.price);
                                     state.set_btc_price(price.price);
                                     let _ = tx.send(DataEvent::PriceUpdate(price));
                                 }
@@ -130,6 +131,7 @@ async fn run_coinbase_fallback(
         match fetch_coinbase_price(&cfg.rest_url, client).await {
             Ok(price) => {
                 debug!("BTC/Coinbase: ${}", price.price);
+                state.vol_tracker.update(price.price);
                 state.set_btc_price(price.price);
                 let _ = tx.send(DataEvent::PriceUpdate(price));
             }
