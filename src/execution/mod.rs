@@ -155,6 +155,18 @@ impl ExecutionEngine {
         let (maker_amount, taker_amount) =
             calculate_amounts(req.price, req.size, &req.side, req.neg_risk);
 
+        // Polymarket enforces a minimum order value of $1 USDC.
+        // For a BUY, makerAmount is the USDC outlay; for a SELL it is the share count — both
+        // 6-decimal.  Guard on makerAmount: $1 = 1_000_000 raw units.
+        const MIN_MAKER_AMOUNT: u128 = 1_000_000; // $1 USDC
+        if maker_amount < MIN_MAKER_AMOUNT {
+            bail!(
+                "Order below minimum: makerAmount={} < {} ($1 USDC). \
+                 Increase order_size or use a price closer to 0.50.",
+                maker_amount, MIN_MAKER_AMOUNT
+            );
+        }
+
         // Build EIP-712 signed order.
         // POLY_PRIVATE_KEY  — Ethereum private key for the trading wallet
         // POLY_FUNDER_ADDRESS — address of the Gnosis Safe / proxy wallet (maker)
@@ -196,14 +208,16 @@ impl ExecutionEngine {
         .await
         .map_err(|e| anyhow::anyhow!("Order signing failed: {}", e))?;
 
-        // For EOA (sig_type 0): maker == signer == EOA address.
-        // For POLY_PROXY (sig_type 1): maker == signer == proxy wallet (funder_address).
-        //   sign_clob_order returns the proxy wallet as signer_addr for sig_type != 0.
-        let order_maker = if sig_type == 0 {
-            signer_addr.as_str()
-        } else {
-            funder_address.as_str()
-        };
+        // `signer_addr` is always returned as lowercase hex by sign_clob_order regardless of
+        // sig_type (it is format!("{:?}", address) which alloy serialises as 0x<lowercase>).
+        // Use it for BOTH the EIP-712 "maker" and "signer" fields so that:
+        //   • the two JSON fields always have identical casing (avoids server string-compare failures)
+        //   • the value matches what was encoded in the EIP-712 hash
+        //
+        // sign_clob_order already handles the distinction:
+        //   sig_type == 0 → signer_addr = EOA lowercase
+        //   sig_type  > 0 → signer_addr = proxy/safe wallet lowercase
+        let order_maker = signer_addr.as_str();
 
         // Field types must match exactly what Polymarket's CLOB expects:
         //   uint256 fields → decimal strings (JS can't hold uint256 as a number)
@@ -290,6 +304,12 @@ impl ExecutionEngine {
                         ),
                         _ => warn!("POST /order → HTTP {}: {}", status, raw_body),
                     }
+                    // Log the request body at WARN so the exact payload sent can be
+                    // inspected without resorting to DEBUG/TRACE log levels.
+                    warn!(
+                        "POST /order request body (for diagnosis):\n  {}",
+                        serde_json::to_string_pretty(body).unwrap_or_default()
+                    );
                     bail!(
                         "HTTP status client error ({} {}) for url ({})",
                         status.as_u16(),

@@ -342,10 +342,47 @@ impl MarketMakingStrategy {
         let tick = dec!(0.01);
         let round_to_tick = |p: Decimal| -> Decimal { (p / tick).round() * tick };
 
+        let mut up_bid = round_to_tick(up_bid);
+        let mut down_bid = round_to_tick(down_bid);
+
+        // ── postOnly cross-prevention ────────────────────────────────────────
+        // With postOnly=true, Polymarket returns 400 "post only order would
+        // execute immediately" if our bid >= the live best_ask.  This happens
+        // when the binary market has moved away from 50/50 — e.g. if BTC drops
+        // sharply, UP tokens are worth ~0.20 and asks sit well below our
+        // 0.45 base bid.  Cap each bid to (best_ask – tick) using the live
+        // orderbook if available.  If no orderbook data yet, keep the computed
+        // bid (conservative: it may still cross on the very first quote, but
+        // the orderbook is populated within the first WS message).
+        if let Some(book) = self.state.order_books.get(&market.token_id_up) {
+            if let Some(best_ask) = book.best_ask() {
+                if up_bid >= best_ask {
+                    let capped = (best_ask - tick).max(dec!(0.01));
+                    debug!(
+                        "[{}] UP bid {:.2} >= best_ask {:.2} → capped to {:.2}",
+                        self.market_type_str, up_bid, best_ask, capped
+                    );
+                    up_bid = capped;
+                }
+            }
+        }
+        if let Some(book) = self.state.order_books.get(&market.token_id_down) {
+            if let Some(best_ask) = book.best_ask() {
+                if down_bid >= best_ask {
+                    let capped = (best_ask - tick).max(dec!(0.01));
+                    debug!(
+                        "[{}] DOWN bid {:.2} >= best_ask {:.2} → capped to {:.2}",
+                        self.market_type_str, down_bid, best_ask, capped
+                    );
+                    down_bid = capped;
+                }
+            }
+        }
+
         QuotePair {
-            up_bid: round_to_tick(up_bid),
+            up_bid,
             up_ask: round_to_tick(up_ask),
-            down_bid: round_to_tick(down_bid),
+            down_bid,
             down_ask: round_to_tick(down_ask),
             up_size,
             down_size,
@@ -602,5 +639,58 @@ mod tests {
     fn test_market_type_str_field() {
         let (strategy, _) = make_strategy();
         assert_eq!(strategy.market_type_str, "5m");
+    }
+
+    /// postOnly cross-prevention: when the live best_ask is BELOW our computed
+    /// bid, calculate_quotes must cap the bid to (best_ask – tick).
+    #[test]
+    fn test_postonly_cross_prevention() {
+        use crate::types::{OrderBook, PriceLevel};
+        let (strategy, _) = make_strategy();
+        let market = make_market();
+
+        // Inject a very low ask for the UP token (simulating a bearish market)
+        // UP asks at 0.20 → our base bid 0.42 would cross
+        let low_ask_book = OrderBook {
+            token_id: market.token_id_up.clone(),
+            bids: vec![PriceLevel { price: dec!(0.18), size: dec!(100) }],
+            asks: vec![PriceLevel { price: dec!(0.20), size: dec!(100) }],
+            timestamp: 0,
+        };
+        strategy.state.order_books.insert(market.token_id_up.clone(), low_ask_book);
+
+        let quotes = strategy.calculate_quotes(&market);
+
+        // UP bid must be strictly below 0.20
+        assert!(
+            quotes.up_bid < dec!(0.20),
+            "UP bid {} should be below best_ask 0.20",
+            quotes.up_bid
+        );
+        // DOWN bid should be unaffected (no orderbook injected for down token)
+        assert!(quotes.down_bid > dec!(0.01));
+    }
+
+    /// When the ask is well above our bid, no capping should occur.
+    #[test]
+    fn test_no_cross_when_ask_above_bid() {
+        use crate::types::{OrderBook, PriceLevel};
+        let (strategy, _) = make_strategy();
+        let market = make_market();
+
+        // Normal ask at 0.55 — well above our ~0.42 bid
+        let normal_book = OrderBook {
+            token_id: market.token_id_up.clone(),
+            bids: vec![PriceLevel { price: dec!(0.50), size: dec!(100) }],
+            asks: vec![PriceLevel { price: dec!(0.55), size: dec!(100) }],
+            timestamp: 0,
+        };
+        strategy.state.order_books.insert(market.token_id_up.clone(), normal_book);
+
+        let quotes = strategy.calculate_quotes(&market);
+        let uncapped = strategy.calculate_quotes(&market); // same result expected
+        // Bid should not have been capped (it was already below 0.55)
+        assert_eq!(quotes.up_bid, uncapped.up_bid);
+        assert!(quotes.up_bid < dec!(0.55));
     }
 }
